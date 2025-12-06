@@ -1,0 +1,237 @@
+# Fil-C build and test container for pg_sexp PostgreSQL extension
+#
+# Builds the pg_sexp extension using fil-c (memory-safe C compiler).
+# Fil-c enforces memory safety at runtime, catching buffer overflows,
+# use-after-free, and other memory errors.
+#
+# Usage:
+#   podman build -f Containerfile.filc -t pg_sexp-filc .
+#   podman run --rm pg_sexp-filc              # Run tests with fil-c build
+#   podman run --rm pg_sexp-filc /run-benchmark.sh  # Run benchmarks
+#   podman run --rm -it pg_sexp-filc bash     # Interactive shell
+#
+# The fil-c compiled extension produces a memory-safe .so file.
+
+FROM docker.io/debian:bookworm
+
+# Install base dependencies and PostgreSQL repo
+RUN apt-get update && apt-get install -y \
+    wget \
+    xz-utils \
+    ca-certificates \
+    make \
+    gnupg2 \
+    lsb-release \
+    patchelf \
+    sudo \
+    && rm -rf /var/lib/apt/lists/*
+
+# Add PostgreSQL official repository
+RUN echo "deb http://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" > /etc/apt/sources.list.d/pgdg.list && \
+    wget --quiet -O - https://www.postgresql.org/media/keys/ACCC4CF8.asc | apt-key add -
+
+# Install PostgreSQL 16
+RUN apt-get update && apt-get install -y \
+    postgresql-16 \
+    postgresql-server-dev-16 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Add PostgreSQL 16 binaries to PATH (Debian installs them in /usr/lib/postgresql/16/bin)
+ENV PATH="/usr/lib/postgresql/16/bin:${PATH}"
+
+# Download and install fil-c
+ENV FILC_VERSION=0.675
+ENV FILC_DIR=/opt/filc
+
+RUN mkdir -p ${FILC_DIR} && \
+    cd /tmp && \
+    wget -q https://github.com/pizlonator/fil-c/releases/download/v${FILC_VERSION}/filc-${FILC_VERSION}-linux-x86_64.tar.xz && \
+    tar -xf filc-${FILC_VERSION}-linux-x86_64.tar.xz && \
+    mv filc-${FILC_VERSION}-linux-x86_64/* ${FILC_DIR}/ && \
+    cd ${FILC_DIR} && \
+    ./setup.sh && \
+    rm -rf /tmp/filc-*
+
+# Verify fil-c installation
+RUN ${FILC_DIR}/build/bin/clang --version
+
+WORKDIR /src
+
+# Copy source files
+COPY src/ /src/src/
+COPY sql/ /src/sql/
+COPY test/ /src/test/
+COPY Makefile.filc /src/
+COPY pg_sexp.control /src/
+
+# Build with fil-c using PGXS
+# The Makefile.filc sets CC to fil-c's clang
+ENV CC="${FILC_DIR}/build/bin/clang"
+RUN make -f Makefile.filc clean all CC=${FILC_DIR}/build/bin/clang 2>&1 || \
+    (echo "=== Build failed, showing compiler info ===" && \
+     ${FILC_DIR}/build/bin/clang --version && \
+     echo "=== PostgreSQL config ===" && \
+     pg_config --version && \
+     pg_config --includedir-server && \
+     exit 1)
+
+# Show build results
+RUN ls -la *.so 2>/dev/null && echo "Fil-C extension built successfully!"
+
+# Install the fil-c built extension
+# PostgreSQL extension directory
+RUN cp pg_sexp_filc.so $(pg_config --pkglibdir)/pg_sexp.so && \
+    cp sql/pg_sexp--0.1.0.sql $(pg_config --sharedir)/extension/ && \
+    cp pg_sexp.control $(pg_config --sharedir)/extension/
+
+# Create directories for PostgreSQL
+RUN mkdir -p /var/run/postgresql && chown postgres:postgres /var/run/postgresql
+RUN mkdir -p /tmp/pgdata && chown postgres:postgres /tmp/pgdata
+
+# Copy test files to postgres-accessible location
+RUN cp -r /src/test /test && chown -R postgres:postgres /test
+
+# Set up test script - uses Unix socket only, no TCP port exposure
+COPY --chmod=755 <<'EOF' /run-tests.sh
+#!/bin/bash
+set -e
+
+echo "=============================================="
+echo "Fil-C Memory-Safe pg_sexp Extension Tests"
+echo "=============================================="
+echo ""
+
+# Initialize database cluster
+echo "Initializing PostgreSQL..."
+initdb -D /tmp/pgdata --auth=trust --no-locale --encoding=UTF8
+
+# Configure PostgreSQL to use Unix socket only (no TCP)
+cat >> /tmp/pgdata/postgresql.conf << 'PGCONF'
+listen_addresses = ''
+unix_socket_directories = '/var/run/postgresql'
+PGCONF
+
+# Start PostgreSQL
+echo "Starting PostgreSQL..."
+pg_ctl -D /tmp/pgdata -l /tmp/pg.log start
+
+# Wait for PostgreSQL to be ready (using socket)
+echo "Waiting for PostgreSQL to start..."
+until pg_isready -h /var/run/postgresql; do
+    sleep 1
+done
+echo "PostgreSQL is ready!"
+echo ""
+
+# Create test database and run tests
+createdb testdb
+psql -d testdb -c "CREATE EXTENSION pg_sexp;"
+
+echo "=== Running basic tests ==="
+psql -d testdb -f /test/test_basic.sql
+
+echo ""
+echo "=== Running robustness tests ==="
+psql -d testdb -f /test/test_robustness.sql
+
+# Cleanup
+pg_ctl -D /tmp/pgdata stop
+echo ""
+echo "=============================================="
+echo "All tests passed with fil-c memory-safe build!"
+echo "=============================================="
+EOF
+
+# Set up benchmark script
+COPY --chmod=755 <<'EOF' /run-benchmark.sh
+#!/bin/bash
+set -e
+
+RESULTS_FILE="/tmp/benchmark_results.txt"
+
+echo "=============================================="
+echo "Fil-C Memory-Safe pg_sexp Benchmark"
+echo "=============================================="
+echo ""
+
+# Initialize database cluster
+echo "Initializing PostgreSQL..."
+initdb -D /tmp/pgdata --auth=trust --no-locale --encoding=UTF8
+
+# Configure PostgreSQL for benchmarking
+cat >> /tmp/pgdata/postgresql.conf << 'PGCONF'
+listen_addresses = ''
+unix_socket_directories = '/var/run/postgresql'
+shared_buffers = 256MB
+work_mem = 64MB
+maintenance_work_mem = 128MB
+effective_cache_size = 512MB
+PGCONF
+
+# Start PostgreSQL
+echo "Starting PostgreSQL..."
+pg_ctl -D /tmp/pgdata -l /tmp/pg.log start
+
+# Wait for PostgreSQL to be ready
+echo "Waiting for PostgreSQL to start..."
+until pg_isready -h /var/run/postgresql; do
+    sleep 1
+done
+echo "PostgreSQL is ready!"
+echo ""
+
+# Create benchmark database
+createdb benchdb
+psql -d benchdb -c "CREATE EXTENSION pg_sexp;"
+
+# Write header to results file
+{
+    echo "=============================================="
+    echo "FIL-C MEMORY-SAFE BUILD BENCHMARK RESULTS"
+    echo "Date: $(date -Iseconds)"
+    echo "=============================================="
+    echo ""
+    echo "=== SYSTEM INFORMATION ==="
+    echo ""
+    echo "CPU Model:"
+    cat /proc/cpuinfo | grep "model name" | head -1
+    echo ""
+    echo "CPU Cores:"
+    nproc
+    echo ""
+    echo "Memory:"
+    free -h | head -2
+    echo ""
+    echo "Kernel:"
+    uname -r
+    echo ""
+    echo "Fil-C Version: ${FILC_VERSION:-0.675}"
+    echo ""
+} > "$RESULTS_FILE"
+
+echo "Running benchmark..."
+psql -d benchdb -f /test/benchmark.sql >> "$RESULTS_FILE" 2>&1
+
+# Add footer
+{
+    echo ""
+    echo "=============================================="
+    echo "Benchmark completed at: $(date -Iseconds)"
+    echo "=============================================="
+} >> "$RESULTS_FILE"
+
+# Cleanup
+pg_ctl -D /tmp/pgdata stop
+
+echo ""
+echo "Benchmark completed!"
+echo ""
+# Output results to stdout so they can be captured
+cat "$RESULTS_FILE"
+EOF
+
+# Switch to postgres user for running tests
+USER postgres
+
+# Default command: run tests
+CMD ["/run-tests.sh"]

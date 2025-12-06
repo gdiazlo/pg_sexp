@@ -1,0 +1,99 @@
+================================================================================
+pg_sexp Benchmark Summary
+Generated: sáb 06 dic 2025 15:25:00 CET
+Image: localhost/pg_sexp-production
+================================================================================
+
+## POSTGRESQL VERSION
+------------------------------------------------------------------------------------------
+
+## STORAGE COMPARISON
+
+ERROR:  relation "bench_sexp" does not exist
+LINE 3:     pg_size_pretty(pg_total_relation_size('bench_sexp')) as ...
+
+## TIMING RESULTS
+
+Test                                                                 Time (ms)
+----------------------------------------------------------------- ------------
+-----------------------------------------------------------------        0.185
+-----------------------------------------------------------------        0.091
+-----------------------------------------------------------------        2.418
+sexp: Inserting 50,000 rows                                              0.068
+jsonb: Inserting 50,000 rows                                           816.837
+sexp: Full table scan with COUNT                                         0.031
+-------                                                                  2.464
+sexp: Full table scan with SUM of data length                            0.028
+----------                                                              38.538
+sexp: Access first element (car)                                         0.036
+-------                                                                  3.915
+sexp: Access nested element (nth 2 = user info)                          0.032
+-------                                                                  3.833
+sexp: Deep nested access (user -> id) via car/cdr                        0.031
+-------                                                                  5.655
+sexp @>>: Filter by settings.theme = dark (33% selectivity)              0.054
+-------                                                                  4.837
+sexp @>>: Filter by user.id = 12345 (highly selective)                   0.044
+-------                                                                  4.406
+sexp @>>: Multi-condition (settings.theme=dark AND notifications=        0.032
+-------                                                                  5.034
+sexp @>: Find exact (theme "dark") sublist anywhere                      0.052
+sexp @>: Find symbol alpha anywhere                                      0.023
+sexp @>: Find string "dark" anywhere                                     0.018
+sexp: Insert 200K AST-like expressions                                   0.053
+jsonb: Insert 200K AST-like structures                                 309.253
+sexp: Find all functions with "let" binding                              0.026
+-------                                                                  5.024
+sexp: Find functions with "cond" form                                    0.035
+-------                                                                 28.544
+sexp: Find functions using multiplication (*)                            0.062
+-------                                                                  2.551
+sexp: Count list operations (car) on AST                                 0.039
+-------                                                                  2.664
+sexp: Insert 100K deeply nested (15 levels)                              0.042
+jsonb: Insert 100K deeply nested (15 levels)                            41.487
+sexp: Sequential scan of deeply nested data                              0.065
+-------                                                                  0.513
+sexp: Find by deep containment                                           0.035
+-------                                                                  5.104
+Inserting 500K rows for GIN benchmark                                    0.056
+Inserting 500K rows for GIN benchmark                                  202.370
+sexp @>>: Containment WITHOUT GIN (seq scan)                             0.025
+-------                                                                  5.391
+Creating GIN indexes                                                     0.071
+Creating GIN indexes                                                   894.647
+sexp @>>: GIN - Find click events (10% selectivity)                      0.026
+-------                                                                  2.007
+sexp @>>: GIN - Find chrome + windows                                    0.106
+-------                                                                  1.782
+sexp @>>: GIN - Find mobile=true events                                  0.059
+-------                                                                  2.300
+sexp @>>: GIN - Find event by ID (highly selective)                      0.028
+-------                                                                  0.111
+sexp @>>: GIN - Complex query (type=purchase AND mobile=true)            0.026
+-------                                                                  0.278
+sexp @>: GIN - Find by tag symbol "important" (structural)               0.034
+sexp @>: GIN - Find exact (type "click") sublist                         0.044
+sexp: Serialize all 500K rows to text                                    0.029
+----------                                                              46.860
+sexp: car operation on 500K rows                                         0.079
+sexp: cdr operation on 500K rows                                         0.021
+sexp: sexp_length on 500K rows                                           0.055
+sexp: nth access (element 3 = metadata) on 500K rows                     0.020
+sexp: Deep nth access on 500K rows                                       0.014
+sexp: Group by first-level element (using car of nth)                    0.019
+---------+-------                                                       26.867
+
+## GIN INDEX SIZES
+
+ERROR:  relation "bench_sexp_gin_idx" does not exist
+LINE 3:     pg_size_pretty(pg_relation_size('bench_sexp_gin_idx')) a...
+
+## PERFORMANCE COMPARISON (sexp vs jsonb)
+
+Operation                                                sexp      jsonb      Ratio
+-------------------------------------------------- ---------- ---------- ----------
+
+================================================================================
+Full results: /home/gdiazlo/data/src/pg_sexp/test/results/benchmark_quick_20251206_152456.txt
+================================================================================

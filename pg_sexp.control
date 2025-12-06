@@ -1,0 +1,5 @@
+# pg_sexp extension
+comment = 'S-expression data type for PostgreSQL (similar to jsonb but for s-expressions)'
+default_version = '0.1.0'
+module_pathname = '$libdir/pg_sexp'
+relocatable = true

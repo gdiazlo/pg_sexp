@@ -1,0 +1,791 @@
+Timing is on.
+Pager usage is off.
+CREATE EXTENSION
+Time: 4.395 ms
+NOTICE:  table "bench_sexp" does not exist, skipping
+DROP TABLE
+Time: 0.078 ms
+NOTICE:  table "bench_jsonb" does not exist, skipping
+DROP TABLE
+Time: 0.019 ms
+NOTICE:  table "bench_sexp_ast" does not exist, skipping
+DROP TABLE
+Time: 0.016 ms
+NOTICE:  table "bench_jsonb_ast" does not exist, skipping
+DROP TABLE
+Time: 0.020 ms
+NOTICE:  table "bench_sexp_deep" does not exist, skipping
+DROP TABLE
+Time: 0.019 ms
+NOTICE:  table "bench_jsonb_deep" does not exist, skipping
+DROP TABLE
+Time: 0.014 ms
+NOTICE:  table "bench_sexp_gin" does not exist, skipping
+DROP TABLE
+Time: 0.014 ms
+NOTICE:  table "bench_jsonb_gin" does not exist, skipping
+DROP TABLE
+Time: 0.014 ms
+
+================================================================================
+BENCHMARK: pg_sexp vs JSONB (Large Scale)
+================================================================================
+
+PostgreSQL Version:
+                                         version                                          
+------------------------------------------------------------------------------------------
+ PostgreSQL 18.1 on x86_64-pc-linux-musl, compiled by Alpine clang version 19.1.4, 64-bit
+(1 row)
+
+Time: 0.080 ms
+
+================================================================================
+TEST 1: BULK INSERT PERFORMANCE (50,000 rows)
+================================================================================
+CREATE TABLE
+Time: 1.956 ms
+CREATE TABLE
+Time: 1.149 ms
+
+--- sexp: Inserting 50,000 rows ---
+Timing is on.
+INSERT 0 50000
+Time: 310.220 ms
+Timing is off.
+
+--- jsonb: Inserting 50,000 rows ---
+Timing is on.
+INSERT 0 50000
+Time: 311.709 ms
+Timing is off.
+
+================================================================================
+TEST 2: STORAGE SIZE COMPARISON
+================================================================================
+
+--- Table and index sizes ---
+ type  | total_size | table_size | row_count 
+-------+------------+------------+-----------
+ sexp  | 21 MB      | 20 MB      |     50000
+ jsonb | 24 MB      | 23 MB      |     50000
+(2 rows)
+
+
+--- Average row size (bytes) ---
+ type  | avg_row_bytes 
+-------+---------------
+ sexp  |           409
+ jsonb |           481
+(2 rows)
+
+
+================================================================================
+TEST 3: SEQUENTIAL SCAN PERFORMANCE (500K rows)
+================================================================================
+ count 
+-------
+ 50000
+(1 row)
+
+ count 
+-------
+ 50000
+(1 row)
+
+
+--- sexp: Full table scan with COUNT ---
+Timing is on.
+ count 
+-------
+ 50000
+(1 row)
+
+Time: 2.350 ms
+Timing is off.
+
+--- jsonb: Full table scan with COUNT ---
+Timing is on.
+ count 
+-------
+ 50000
+(1 row)
+
+Time: 3.100 ms
+Timing is off.
+
+--- sexp: Full table scan with SUM of data length ---
+Timing is on.
+   sum    
+----------
+ 13354777
+(1 row)
+
+Time: 30.267 ms
+Timing is off.
+
+--- jsonb: Full table scan with SUM of data length ---
+Timing is on.
+   sum    
+----------
+ 15574665
+(1 row)
+
+Time: 42.187 ms
+Timing is off.
+
+================================================================================
+TEST 4: ELEMENT ACCESS PATTERNS (500K rows)
+================================================================================
+
+--- sexp: Access first element (car) ---
+Timing is on.
+ count 
+-------
+ 50000
+(1 row)
+
+Time: 8.384 ms
+Timing is off.
+
+--- jsonb: Access first-level key ---
+Timing is on.
+ count 
+-------
+ 50000
+(1 row)
+
+Time: 4.561 ms
+Timing is off.
+
+--- sexp: Access nested element (nth 2 = user info) ---
+Timing is on.
+ count 
+-------
+ 50000
+(1 row)
+
+Time: 6.137 ms
+Timing is off.
+
+--- jsonb: Access nested element (user object) ---
+Timing is on.
+ count 
+-------
+ 50000
+(1 row)
+
+Time: 4.610 ms
+Timing is off.
+
+--- sexp: Deep nested access (user -> id) via car/cdr ---
+Timing is on.
+ count 
+-------
+ 50000
+(1 row)
+
+Time: 14.910 ms
+Timing is off.
+
+--- jsonb: Deep nested access (user -> id) ---
+Timing is on.
+ count 
+-------
+ 50000
+(1 row)
+
+Time: 5.515 ms
+Timing is off.
+
+================================================================================
+TEST 5: KEY-BASED CONTAINMENT (500K rows) - Fair Comparison
+================================================================================
+
+Both sexp @>> and jsonb @> use KEY-BASED containment semantics:
+  - Match by nested key/value pairs
+  - Order independent within objects/lists
+  - Partial matching (needle is subset of container)
+
+--- sexp @>>: Filter by settings.theme = dark (33% selectivity) ---
+Timing is on.
+ count 
+-------
+ 16666
+(1 row)
+
+Time: 17.447 ms
+Timing is off.
+
+--- jsonb @>: Filter by settings.theme = dark (33% selectivity) ---
+Timing is on.
+ count 
+-------
+ 16666
+(1 row)
+
+Time: 5.635 ms
+Timing is off.
+
+--- sexp @>>: Filter by user.id = 12345 (highly selective) ---
+Timing is on.
+ count 
+-------
+     1
+(1 row)
+
+Time: 16.902 ms
+Timing is off.
+
+--- jsonb @>: Filter by user.id = 12345 (highly selective) ---
+Timing is on.
+ count 
+-------
+     1
+(1 row)
+
+Time: 5.149 ms
+Timing is off.
+
+--- sexp @>>: Multi-condition (settings.theme=dark AND notifications=true) ---
+Timing is on.
+ count 
+-------
+  8333
+(1 row)
+
+Time: 14.833 ms
+Timing is off.
+
+--- jsonb @>: Multi-condition (settings.theme=dark AND notifications=true) ---
+Timing is on.
+ count 
+-------
+  8333
+(1 row)
+
+Time: 5.601 ms
+Timing is off.
+
+================================================================================
+TEST 5b: STRUCTURAL CONTAINMENT (sexp @> only)
+================================================================================
+
+sexp @> finds EXACT sublists anywhere in structure (unique to sexp)
+
+--- sexp @>: Find exact (theme "dark") sublist anywhere ---
+Timing is on.
+ count 
+-------
+ 16666
+(1 row)
+
+Time: 13.117 ms
+Timing is off.
+
+--- sexp @>: Find symbol alpha anywhere ---
+Timing is on.
+ count 
+-------
+ 10000
+(1 row)
+
+Time: 14.152 ms
+Timing is off.
+
+--- sexp @>: Find string "dark" anywhere ---
+Timing is on.
+ count 
+-------
+ 16666
+(1 row)
+
+Time: 10.976 ms
+Timing is off.
+
+================================================================================
+TEST 6: COMPLEX AST-LIKE STRUCTURES (200K rows)
+================================================================================
+CREATE TABLE
+CREATE TABLE
+
+--- sexp: Insert 200K AST-like expressions ---
+Timing is on.
+INSERT 0 20000
+Time: 116.733 ms
+Timing is off.
+
+--- jsonb: Insert 200K AST-like structures ---
+Timing is on.
+INSERT 0 20000
+Time: 312.603 ms
+Timing is off.
+
+--- AST storage sizes ---
+   type    | total_size | table_size 
+-----------+------------+------------
+ sexp_ast  | 6888 kB    | 6400 kB
+ jsonb_ast | 27 MB      | 26 MB
+(2 rows)
+
+
+--- sexp: Find all functions with "let" binding ---
+Timing is on.
+ count 
+-------
+ 20000
+(1 row)
+
+Time: 4.000 ms
+Timing is off.
+
+--- jsonb: Find all functions with "let" type ---
+Timing is on.
+ count 
+-------
+ 20000
+(1 row)
+
+Time: 4.922 ms
+Timing is off.
+
+--- sexp: Find functions with "cond" form ---
+Timing is on.
+ count 
+-------
+ 20000
+(1 row)
+
+Time: 6.945 ms
+Timing is off.
+
+--- jsonb: Find functions with "cond" type ---
+Timing is on.
+ count 
+-------
+ 20000
+(1 row)
+
+Time: 31.600 ms
+Timing is off.
+
+--- sexp: Find functions using multiplication (*) ---
+Timing is on.
+ count 
+-------
+     0
+(1 row)
+
+Time: 8.169 ms
+Timing is off.
+
+--- jsonb: Find functions using multiplication ---
+Timing is on.
+ count 
+-------
+     0
+(1 row)
+
+Time: 3.166 ms
+Timing is off.
+
+--- sexp: Count list operations (car) on AST ---
+Timing is on.
+ count 
+-------
+ 20000
+(1 row)
+
+Time: 4.334 ms
+Timing is off.
+
+--- jsonb: Count type checks on AST ---
+Timing is on.
+ count 
+-------
+ 20000
+(1 row)
+
+Time: 3.549 ms
+Timing is off.
+
+================================================================================
+TEST 7: DEEPLY NESTED STRUCTURES (100K rows, 15 levels)
+================================================================================
+CREATE TABLE
+CREATE TABLE
+
+--- sexp: Insert 100K deeply nested (15 levels) ---
+Timing is on.
+INSERT 0 10000
+Time: 42.537 ms
+Timing is off.
+
+--- jsonb: Insert 100K deeply nested (15 levels) ---
+Timing is on.
+INSERT 0 10000
+Time: 41.137 ms
+Timing is off.
+
+--- Deep nesting storage sizes ---
+    type    | total_size | table_size 
+------------+------------+------------
+ sexp_deep  | 2848 kB    | 2576 kB
+ jsonb_deep | 4488 kB    | 4216 kB
+(2 rows)
+
+
+--- sexp: Sequential scan of deeply nested data ---
+Timing is on.
+ count 
+-------
+ 10000
+(1 row)
+
+Time: 0.799 ms
+Timing is off.
+
+--- jsonb: Sequential scan of deeply nested data ---
+Timing is on.
+ count 
+-------
+ 10000
+(1 row)
+
+Time: 0.600 ms
+Timing is off.
+
+--- sexp: Find by deep containment ---
+Timing is on.
+ count 
+-------
+    10
+(1 row)
+
+Time: 4.921 ms
+Timing is off.
+
+--- jsonb: Find by deep containment ---
+Timing is on.
+ count 
+-------
+    10
+(1 row)
+
+Time: 5.884 ms
+Timing is off.
+
+================================================================================
+TEST 8: GIN INDEX PERFORMANCE (500K rows)
+================================================================================
+CREATE TABLE
+CREATE TABLE
+
+--- Inserting 500K rows for GIN benchmark ---
+Timing is on.
+INSERT 0 50000
+Time: 237.049 ms
+Timing is off.
+Timing is on.
+INSERT 0 50000
+Time: 209.492 ms
+Timing is off.
+
+--- GIN table sizes (before index) ---
+   type    | total_size | table_size 
+-----------+------------+------------
+ sexp_gin  | 16 MB      | 14 MB
+ jsonb_gin | 15 MB      | 14 MB
+(2 rows)
+
+
+--- sexp @>>: Containment WITHOUT GIN (seq scan) ---
+Timing is on.
+ count 
+-------
+  5000
+(1 row)
+
+Time: 12.486 ms
+Timing is off.
+
+--- jsonb @>: Containment WITHOUT GIN (seq scan) ---
+Timing is on.
+ count 
+-------
+  5000
+(1 row)
+
+Time: 5.383 ms
+Timing is off.
+
+--- Creating GIN indexes ---
+Timing is on.
+CREATE INDEX
+Time: 987.995 ms
+Timing is off.
+Timing is on.
+CREATE INDEX
+Time: 545.205 ms
+Timing is off.
+ANALYZE
+ANALYZE
+
+--- GIN Index sizes ---
+   type    | index_size 
+-----------+------------
+ sexp_gin  | 18 MB
+ jsonb_gin | 9824 kB
+(2 rows)
+
+SET
+
+--- sexp @>>: GIN - Find click events (10% selectivity) ---
+Timing is on.
+ count 
+-------
+  5000
+(1 row)
+
+Time: 3.220 ms
+Timing is off.
+
+--- jsonb @>: GIN - Find click events (10% selectivity) ---
+Timing is on.
+ count 
+-------
+  5000
+(1 row)
+
+Time: 1.893 ms
+Timing is off.
+
+--- sexp @>>: GIN - Find chrome + windows ---
+Timing is on.
+ count 
+-------
+  4166
+(1 row)
+
+Time: 4.111 ms
+Timing is off.
+
+--- jsonb @>: GIN - Find chrome + windows ---
+Timing is on.
+ count 
+-------
+  4166
+(1 row)
+
+Time: 2.141 ms
+Timing is off.
+
+--- sexp @>>: GIN - Find mobile=true events ---
+Timing is on.
+ count 
+-------
+ 10000
+(1 row)
+
+Time: 4.892 ms
+Timing is off.
+
+--- jsonb @>: GIN - Find mobile=true events ---
+Timing is on.
+ count 
+-------
+ 10000
+(1 row)
+
+Time: 3.212 ms
+Timing is off.
+
+--- sexp @>>: GIN - Find event by ID (highly selective) ---
+Timing is on.
+ count 
+-------
+     1
+(1 row)
+
+Time: 0.238 ms
+Timing is off.
+
+--- jsonb @>: GIN - Find event by ID (highly selective) ---
+Timing is on.
+ count 
+-------
+     1
+(1 row)
+
+Time: 0.097 ms
+Timing is off.
+
+--- sexp @>>: GIN - Complex query (type=purchase AND mobile=true) ---
+Timing is on.
+ count 
+-------
+     0
+(1 row)
+
+Time: 1.627 ms
+Timing is off.
+
+--- jsonb @>: GIN - Complex query (type=purchase AND mobile=true) ---
+Timing is on.
+ count 
+-------
+     0
+(1 row)
+
+Time: 0.229 ms
+Timing is off.
+
+================================================================================
+TEST 8b: STRUCTURAL CONTAINMENT WITH GIN (sexp @> only)
+================================================================================
+
+--- sexp @>: GIN - Find by tag symbol "important" (structural) ---
+Timing is on.
+ count 
+-------
+ 14285
+(1 row)
+
+Time: 5.871 ms
+Timing is off.
+
+--- sexp @>: GIN - Find exact (type "click") sublist ---
+Timing is on.
+ count 
+-------
+  5000
+(1 row)
+
+Time: 2.217 ms
+Timing is off.
+SET
+
+================================================================================
+TEST 9: SERIALIZATION/OUTPUT PERFORMANCE (500K rows)
+================================================================================
+
+--- sexp: Serialize all 500K rows to text ---
+Timing is on.
+   sum    
+----------
+ 13354777
+(1 row)
+
+Time: 73.769 ms
+Timing is off.
+
+--- jsonb: Serialize all 500K rows to text ---
+Timing is on.
+   sum    
+----------
+ 15574665
+(1 row)
+
+Time: 53.027 ms
+Timing is off.
+
+================================================================================
+TEST 10: LIST OPERATIONS ON LARGE DATA (sexp-specific)
+================================================================================
+
+--- sexp: car operation on 500K rows ---
+Timing is on.
+ count 
+-------
+ 50000
+(1 row)
+
+Time: 14.957 ms
+Timing is off.
+
+--- sexp: cdr operation on 500K rows ---
+Timing is on.
+ count 
+-------
+ 50000
+(1 row)
+
+Time: 52.063 ms
+Timing is off.
+
+--- sexp: sexp_length on 500K rows ---
+Timing is on.
+        avg         
+--------------------
+ 7.0000000000000000
+(1 row)
+
+Time: 9.069 ms
+Timing is off.
+
+--- sexp: nth access (element 3 = metadata) on 500K rows ---
+Timing is on.
+ count 
+-------
+ 50000
+(1 row)
+
+Time: 12.117 ms
+Timing is off.
+
+--- sexp: Deep nth access on 500K rows ---
+Timing is on.
+ count 
+-------
+     0
+(1 row)
+
+Time: 20.705 ms
+Timing is off.
+
+================================================================================
+TEST 11: AGGREGATION QUERIES
+================================================================================
+
+--- sexp: Group by first-level element (using car of nth) ---
+Timing is on.
+ user_field | count 
+------------+-------
+ user       |  5000
+ user       |  5000
+ user       |  5000
+ user       |  5000
+ user       |  5000
+(5 rows)
+
+Time: 22.535 ms
+Timing is off.
+
+--- jsonb: Group by first-level key ---
+Timing is on.
+ user_id | count 
+---------+-------
+ 1       |     1
+ 10      |     1
+ 100     |     1
+ 1000    |     1
+ 10000   |     1
+(5 rows)
+
+Time: 33.754 ms
+Timing is off.
+
+================================================================================
+CLEANUP
+================================================================================
+DROP TABLE
+DROP TABLE
+DROP TABLE
+DROP TABLE
+DROP TABLE
+DROP TABLE
+DROP TABLE
+DROP TABLE
+
+================================================================================
+BENCHMARK COMPLETE
+================================================================================

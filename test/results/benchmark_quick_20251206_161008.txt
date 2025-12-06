@@ -1,0 +1,214 @@
+Timing is on.
+Pager usage is off.
+CREATE EXTENSION
+Time: 4.125 ms
+NOTICE:  table "bench_sexp" does not exist, skipping
+DROP TABLE
+Time: 0.129 ms
+NOTICE:  table "bench_jsonb" does not exist, skipping
+DROP TABLE
+Time: 0.058 ms
+DROP TABLE
+NOTICE:  table "bench_sexp_ast" does not exist, skipping
+Time: 0.026 ms
+NOTICE:  table "bench_jsonb_ast" does not exist, skipping
+DROP TABLE
+Time: 0.020 ms
+NOTICE:  table "bench_sexp_deep" does not exist, skipping
+DROP TABLE
+Time: 0.034 ms
+NOTICE:  table "bench_jsonb_deep" does not exist, skipping
+DROP TABLE
+Time: 0.018 ms
+NOTICE:  table "bench_sexp_gin" does not exist, skipping
+DROP TABLE
+Time: 0.025 ms
+NOTICE:  table "bench_jsonb_gin" does not exist, skipping
+DROP TABLE
+Time: 0.017 ms
+
+================================================================================
+BENCHMARK: pg_sexp vs JSONB (Large Scale)
+================================================================================
+
+PostgreSQL Version:
+                                         version                                          
+------------------------------------------------------------------------------------------
+ PostgreSQL 18.1 on x86_64-pc-linux-musl, compiled by Alpine clang version 19.1.4, 64-bit
+(1 row)
+
+Time: 0.080 ms
+
+================================================================================
+TEST 1: BULK INSERT PERFORMANCE (50,000 rows)
+================================================================================
+CREATE TABLE
+Time: 2.031 ms
+CREATE TABLE
+Time: 1.128 ms
+
+--- sexp: Inserting 50,000 rows ---
+Timing is on.
+INSERT 0 50000
+Time: 301.527 ms
+Timing is off.
+
+--- jsonb: Inserting 50,000 rows ---
+Timing is on.
+INSERT 0 50000
+Time: 291.098 ms
+Timing is off.
+
+================================================================================
+TEST 2: STORAGE SIZE COMPARISON
+================================================================================
+
+--- Table and index sizes ---
+ type  | total_size | table_size | row_count 
+-------+------------+------------+-----------
+ sexp  | 16 MB      | 15 MB      |     50000
+ jsonb | 24 MB      | 23 MB      |     50000
+(2 rows)
+
+
+--- Average row size (bytes) ---
+ type  | avg_row_bytes 
+-------+---------------
+ sexp  |           313
+ jsonb |           481
+(2 rows)
+
+
+================================================================================
+TEST 3: SEQUENTIAL SCAN PERFORMANCE (500K rows)
+================================================================================
+ count 
+-------
+ 50000
+(1 row)
+
+ count 
+-------
+ 50000
+(1 row)
+
+
+--- sexp: Full table scan with COUNT ---
+Timing is on.
+ count 
+-------
+ 50000
+(1 row)
+
+Time: 2.016 ms
+Timing is off.
+
+--- jsonb: Full table scan with COUNT ---
+Timing is on.
+ count 
+-------
+ 50000
+(1 row)
+
+Time: 2.393 ms
+Timing is off.
+
+--- sexp: Full table scan with SUM of data length ---
+Timing is on.
+   sum    
+----------
+ 13354530
+(1 row)
+
+Time: 29.967 ms
+Timing is off.
+
+--- jsonb: Full table scan with SUM of data length ---
+Timing is on.
+   sum    
+----------
+ 15575131
+(1 row)
+
+Time: 39.158 ms
+Timing is off.
+
+================================================================================
+TEST 4: ELEMENT ACCESS PATTERNS (500K rows)
+================================================================================
+
+--- sexp: Access first element (car) ---
+Timing is on.
+ count 
+-------
+ 50000
+(1 row)
+
+Time: 8.069 ms
+Timing is off.
+
+--- jsonb: Access first-level key ---
+Timing is on.
+ count 
+-------
+ 50000
+(1 row)
+
+Time: 3.835 ms
+Timing is off.
+
+--- sexp: Access nested element (nth 2 = user info) ---
+Timing is on.
+ count 
+-------
+ 50000
+(1 row)
+
+Time: 6.933 ms
+Timing is off.
+
+--- jsonb: Access nested element (user object) ---
+Timing is on.
+ count 
+-------
+ 50000
+(1 row)
+
+Time: 3.998 ms
+Timing is off.
+
+--- sexp: Deep nested access (user -> id) via car/cdr ---
+Timing is on.
+ count 
+-------
+ 50000
+(1 row)
+
+Time: 16.209 ms
+Timing is off.
+
+--- jsonb: Deep nested access (user -> id) ---
+Timing is on.
+ count 
+-------
+ 50000
+(1 row)
+
+Time: 5.101 ms
+Timing is off.
+
+================================================================================
+TEST 5: KEY-BASED CONTAINMENT (500K rows) - Fair Comparison
+================================================================================
+
+Both sexp @>> and jsonb @> use KEY-BASED containment semantics:
+  - Match by nested key/value pairs
+  - Order independent within objects/lists
+  - Partial matching (needle is subset of container)
+
+--- sexp @>>: Filter by settings.theme = dark (33% selectivity) ---
+Timing is on.
+server closed the connection unexpectedly
+	This probably means the server terminated abnormally
+	before or while processing the request.
+connection to server was lost

@@ -1,0 +1,163 @@
+# Build PostgreSQL with fil-c (memory-safe C compiler)
+#
+# This container attempts to compile PostgreSQL itself with fil-c,
+# which would enable fully memory-safe PostgreSQL + extensions.
+#
+# Usage:
+#   podman build -f Containerfile.filc-postgres -t pg_sexp-filc-postgres .
+#   podman run --rm pg_sexp-filc-postgres          # Build PostgreSQL
+#   podman run --rm -it pg_sexp-filc-postgres bash # Interactive shell
+#
+# Note: This is experimental - fil-c may not support all PostgreSQL code patterns.
+
+FROM docker.io/debian:bookworm
+
+# Install build dependencies for PostgreSQL
+RUN apt-get update && apt-get install -y \
+    wget \
+    xz-utils \
+    ca-certificates \
+    make \
+    gnupg2 \
+    lsb-release \
+    patchelf \
+    bison \
+    flex \
+    libreadline-dev \
+    zlib1g-dev \
+    libssl-dev \
+    libxml2-dev \
+    libxslt1-dev \
+    pkg-config \
+    python3 \
+    perl \
+    tcl \
+    git \
+    bzip2 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Download and install fil-c
+ENV FILC_VERSION=0.675
+ENV FILC_DIR=/opt/filc
+
+RUN mkdir -p ${FILC_DIR} && \
+    cd /tmp && \
+    wget -q https://github.com/pizlonator/fil-c/releases/download/v${FILC_VERSION}/filc-${FILC_VERSION}-linux-x86_64.tar.xz && \
+    tar -xf filc-${FILC_VERSION}-linux-x86_64.tar.xz && \
+    mv filc-${FILC_VERSION}-linux-x86_64/* ${FILC_DIR}/ && \
+    cd ${FILC_DIR} && \
+    ./setup.sh && \
+    rm -rf /tmp/filc-*
+
+# Verify fil-c installation
+RUN ${FILC_DIR}/build/bin/clang --version
+
+# Download PostgreSQL source
+ENV PG_VERSION=16.4
+WORKDIR /build
+
+RUN wget -q https://ftp.postgresql.org/pub/source/v${PG_VERSION}/postgresql-${PG_VERSION}.tar.bz2 && \
+    tar -xf postgresql-${PG_VERSION}.tar.bz2 && \
+    rm postgresql-${PG_VERSION}.tar.bz2
+
+WORKDIR /build/postgresql-${PG_VERSION}
+
+# Set up fil-c as the compiler
+ENV CC="${FILC_DIR}/build/bin/clang"
+ENV CXX="${FILC_DIR}/build/bin/clang++"
+
+# Create a build script that captures output and handles errors
+COPY --chmod=755 <<'EOF' /build-postgres.sh
+#!/bin/bash
+set -e
+
+echo "=============================================="
+echo "Building PostgreSQL ${PG_VERSION} with Fil-C"
+echo "=============================================="
+echo ""
+echo "Fil-C version:"
+${FILC_DIR}/build/bin/clang --version | head -3
+echo ""
+
+cd /build/postgresql-${PG_VERSION}
+
+# Configure PostgreSQL
+# Disable some features that may cause issues with fil-c
+# Fil-c uses musl libc, so we can't link against glibc-based system libraries
+echo "=== Configuring PostgreSQL ==="
+./configure \
+    CC="${FILC_DIR}/build/bin/clang" \
+    CFLAGS="-O2" \
+    --prefix=/opt/postgres-filc \
+    --without-icu \
+    --without-llvm \
+    --without-perl \
+    --without-python \
+    --without-tcl \
+    --without-gssapi \
+    --without-ldap \
+    --without-pam \
+    --without-systemd \
+    --without-selinux \
+    --without-bonjour \
+    --without-readline \
+    --without-zlib \
+    --without-openssl \
+    --without-libxml \
+    --without-libxslt \
+    2>&1 | tee /tmp/configure.log
+
+if [ ${PIPESTATUS[0]} -ne 0 ]; then
+    echo ""
+    echo "=== Configure FAILED ==="
+    tail -100 /tmp/configure.log
+    exit 1
+fi
+
+echo ""
+echo "=== Configure successful ==="
+echo ""
+
+# Build PostgreSQL
+echo "=== Building PostgreSQL (this may take a while) ==="
+make -j$(nproc) 2>&1 | tee /tmp/build.log
+
+BUILD_STATUS=${PIPESTATUS[0]}
+
+if [ $BUILD_STATUS -ne 0 ]; then
+    echo ""
+    echo "=== Build FAILED ==="
+    echo "Last 200 lines of build log:"
+    tail -200 /tmp/build.log
+    exit 1
+fi
+
+echo ""
+echo "=== Build successful! ==="
+
+# Install
+echo ""
+echo "=== Installing PostgreSQL ==="
+make install 2>&1 | tee /tmp/install.log
+
+if [ ${PIPESTATUS[0]} -ne 0 ]; then
+    echo ""
+    echo "=== Install FAILED ==="
+    tail -50 /tmp/install.log
+    exit 1
+fi
+
+echo ""
+echo "=============================================="
+echo "PostgreSQL built successfully with Fil-C!"
+echo "=============================================="
+echo ""
+echo "Installation directory: /opt/postgres-filc"
+ls -la /opt/postgres-filc/bin/
+echo ""
+echo "PostgreSQL version:"
+/opt/postgres-filc/bin/postgres --version
+EOF
+
+# Default: run the build
+CMD ["/build-postgres.sh"]

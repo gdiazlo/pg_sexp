@@ -1,0 +1,721 @@
+Timing is on.
+Pager usage is off.
+NOTICE:  table "bench_sexp" does not exist, skipping
+DROP TABLE
+Time: 0.148 ms
+NOTICE:  table "bench_jsonb" does not exist, skipping
+DROP TABLE
+Time: 0.022 ms
+NOTICE:  table "bench_sexp_ast" does not exist, skipping
+DROP TABLE
+Time: 0.021 ms
+NOTICE:  table "bench_jsonb_ast" does not exist, skipping
+DROP TABLE
+Time: 0.016 ms
+NOTICE:  table "bench_sexp_deep" does not exist, skipping
+DROP TABLE
+Time: 0.100 ms
+NOTICE:  table "bench_jsonb_deep" does not exist, skipping
+DROP TABLE
+Time: 0.055 ms
+NOTICE:  table "bench_sexp_gin" does not exist, skipping
+DROP TABLE
+Time: 0.040 ms
+NOTICE:  table "bench_jsonb_gin" does not exist, skipping
+DROP TABLE
+Time: 0.052 ms
+
+================================================================================
+BENCHMARK: pg_sexp vs JSONB (Large Scale)
+================================================================================
+
+PostgreSQL Version:
+                                         version                                          
+------------------------------------------------------------------------------------------
+ PostgreSQL 18.1 on x86_64-pc-linux-musl, compiled by Alpine clang version 19.1.4, 64-bit
+(1 row)
+
+Time: 0.185 ms
+
+================================================================================
+TEST 1: BULK INSERT PERFORMANCE (50,000 rows)
+================================================================================
+ERROR:  type "sexp" does not exist
+LINE 1: CREATE TABLE bench_sexp (id serial PRIMARY KEY, data sexp);
+                                                             ^
+Time: 0.091 ms
+CREATE TABLE
+Time: 2.418 ms
+
+--- sexp: Inserting 50,000 rows ---
+Timing is on.
+ERROR:  relation "bench_sexp" does not exist
+LINE 1: INSERT INTO bench_sexp (data)
+                    ^
+Time: 0.068 ms
+Timing is off.
+
+--- jsonb: Inserting 50,000 rows ---
+Timing is on.
+INSERT 0 50000
+Time: 816.837 ms
+Timing is off.
+
+================================================================================
+TEST 2: STORAGE SIZE COMPARISON
+================================================================================
+
+--- Table and index sizes ---
+ERROR:  relation "bench_sexp" does not exist
+LINE 3:     pg_size_pretty(pg_total_relation_size('bench_sexp')) as ...
+                                                  ^
+
+--- Average row size (bytes) ---
+ERROR:  relation "bench_sexp" does not exist
+LINE 4: FROM bench_sexp
+             ^
+
+================================================================================
+TEST 3: SEQUENTIAL SCAN PERFORMANCE (500K rows)
+================================================================================
+ERROR:  relation "bench_sexp" does not exist
+LINE 1: SELECT COUNT(*) FROM bench_sexp;
+                             ^
+ count 
+-------
+ 50000
+(1 row)
+
+
+--- sexp: Full table scan with COUNT ---
+Timing is on.
+ERROR:  relation "bench_sexp" does not exist
+LINE 1: SELECT COUNT(*) FROM bench_sexp;
+                             ^
+Time: 0.031 ms
+Timing is off.
+
+--- jsonb: Full table scan with COUNT ---
+Timing is on.
+ count 
+-------
+ 50000
+(1 row)
+
+Time: 2.464 ms
+Timing is off.
+
+--- sexp: Full table scan with SUM of data length ---
+Timing is on.
+ERROR:  relation "bench_sexp" does not exist
+LINE 1: SELECT SUM(octet_length(data::text)) FROM bench_sexp;
+                                                  ^
+Time: 0.028 ms
+Timing is off.
+
+--- jsonb: Full table scan with SUM of data length ---
+Timing is on.
+   sum    
+----------
+ 15574961
+(1 row)
+
+Time: 38.538 ms
+Timing is off.
+
+================================================================================
+TEST 4: ELEMENT ACCESS PATTERNS (500K rows)
+================================================================================
+
+--- sexp: Access first element (car) ---
+Timing is on.
+ERROR:  relation "bench_sexp" does not exist
+LINE 1: SELECT COUNT(*) FROM bench_sexp WHERE car(data) = 'record'::...
+                             ^
+Time: 0.036 ms
+Timing is off.
+
+--- jsonb: Access first-level key ---
+Timing is on.
+ count 
+-------
+ 50000
+(1 row)
+
+Time: 3.915 ms
+Timing is off.
+
+--- sexp: Access nested element (nth 2 = user info) ---
+Timing is on.
+ERROR:  relation "bench_sexp" does not exist
+LINE 1: SELECT COUNT(*) FROM bench_sexp WHERE nth(data, 2) IS NOT NU...
+                             ^
+Time: 0.032 ms
+Timing is off.
+
+--- jsonb: Access nested element (user object) ---
+Timing is on.
+ count 
+-------
+ 50000
+(1 row)
+
+Time: 3.833 ms
+Timing is off.
+
+--- sexp: Deep nested access (user -> id) via car/cdr ---
+Timing is on.
+ERROR:  relation "bench_sexp" does not exist
+LINE 1: SELECT COUNT(*) FROM bench_sexp 
+                             ^
+Time: 0.031 ms
+Timing is off.
+
+--- jsonb: Deep nested access (user -> id) ---
+Timing is on.
+ count 
+-------
+ 50000
+(1 row)
+
+Time: 5.655 ms
+Timing is off.
+
+================================================================================
+TEST 5: KEY-BASED CONTAINMENT (500K rows) - Fair Comparison
+================================================================================
+
+Both sexp @>> and jsonb @> use KEY-BASED containment semantics:
+  - Match by nested key/value pairs
+  - Order independent within objects/lists
+  - Partial matching (needle is subset of container)
+
+--- sexp @>>: Filter by settings.theme = dark (33% selectivity) ---
+Timing is on.
+ERROR:  relation "bench_sexp" does not exist
+LINE 1: SELECT COUNT(*) FROM bench_sexp 
+                             ^
+Time: 0.054 ms
+Timing is off.
+
+--- jsonb @>: Filter by settings.theme = dark (33% selectivity) ---
+Timing is on.
+ count 
+-------
+ 16666
+(1 row)
+
+Time: 4.837 ms
+Timing is off.
+
+--- sexp @>>: Filter by user.id = 12345 (highly selective) ---
+Timing is on.
+ERROR:  relation "bench_sexp" does not exist
+LINE 1: SELECT COUNT(*) FROM bench_sexp 
+                             ^
+Time: 0.044 ms
+Timing is off.
+
+--- jsonb @>: Filter by user.id = 12345 (highly selective) ---
+Timing is on.
+ count 
+-------
+     1
+(1 row)
+
+Time: 4.406 ms
+Timing is off.
+
+--- sexp @>>: Multi-condition (settings.theme=dark AND notifications=true) ---
+Timing is on.
+ERROR:  relation "bench_sexp" does not exist
+LINE 1: SELECT COUNT(*) FROM bench_sexp 
+                             ^
+Time: 0.032 ms
+Timing is off.
+
+--- jsonb @>: Multi-condition (settings.theme=dark AND notifications=true) ---
+Timing is on.
+ count 
+-------
+  8333
+(1 row)
+
+Time: 5.034 ms
+Timing is off.
+
+================================================================================
+TEST 5b: STRUCTURAL CONTAINMENT (sexp @> only)
+================================================================================
+
+sexp @> finds EXACT sublists anywhere in structure (unique to sexp)
+
+--- sexp @>: Find exact (theme "dark") sublist anywhere ---
+Timing is on.
+ERROR:  relation "bench_sexp" does not exist
+LINE 1: SELECT COUNT(*) FROM bench_sexp WHERE data @> '(theme "dark"...
+                             ^
+Time: 0.052 ms
+Timing is off.
+
+--- sexp @>: Find symbol alpha anywhere ---
+Timing is on.
+ERROR:  relation "bench_sexp" does not exist
+LINE 1: SELECT COUNT(*) FROM bench_sexp WHERE data @> 'alpha'::sexp;
+                             ^
+Time: 0.023 ms
+Timing is off.
+
+--- sexp @>: Find string "dark" anywhere ---
+Timing is on.
+ERROR:  relation "bench_sexp" does not exist
+LINE 1: SELECT COUNT(*) FROM bench_sexp WHERE data @> '"dark"'::sexp...
+                             ^
+Time: 0.018 ms
+Timing is off.
+
+================================================================================
+TEST 6: COMPLEX AST-LIKE STRUCTURES (200K rows)
+================================================================================
+ERROR:  type "sexp" does not exist
+LINE 1: ...ATE TABLE bench_sexp_ast (id serial PRIMARY KEY, data sexp);
+                                                                 ^
+CREATE TABLE
+
+--- sexp: Insert 200K AST-like expressions ---
+Timing is on.
+ERROR:  relation "bench_sexp_ast" does not exist
+LINE 1: INSERT INTO bench_sexp_ast (data)
+                    ^
+Time: 0.053 ms
+Timing is off.
+
+--- jsonb: Insert 200K AST-like structures ---
+Timing is on.
+INSERT 0 20000
+Time: 309.253 ms
+Timing is off.
+
+--- AST storage sizes ---
+ERROR:  relation "bench_sexp_ast" does not exist
+LINE 3:     pg_size_pretty(pg_total_relation_size('bench_sexp_ast'))...
+                                                  ^
+
+--- sexp: Find all functions with "let" binding ---
+Timing is on.
+Time: 0.026 ms
+Timing is off.
+
+ERROR:  relation "bench_sexp_ast" does not exist
+LINE 1: SELECT COUNT(*) FROM bench_sexp_ast WHERE data @> 'let'::sex...
+                             ^
+--- jsonb: Find all functions with "let" type ---
+Timing is on.
+ count 
+-------
+ 20000
+(1 row)
+
+Time: 5.024 ms
+Timing is off.
+
+--- sexp: Find functions with "cond" form ---
+Timing is on.
+ERROR:  relation "bench_sexp_ast" does not exist
+LINE 1: SELECT COUNT(*) FROM bench_sexp_ast WHERE data @> 'cond'::se...
+                             ^
+Time: 0.035 ms
+Timing is off.
+
+--- jsonb: Find functions with "cond" type ---
+Timing is on.
+ count 
+-------
+ 20000
+(1 row)
+
+Time: 28.544 ms
+Timing is off.
+
+--- sexp: Find functions using multiplication (*) ---
+Timing is on.
+ERROR:  relation "bench_sexp_ast" does not exist
+LINE 1: SELECT COUNT(*) FROM bench_sexp_ast WHERE data @> '(*)'::sex...
+                             ^
+Time: 0.062 ms
+Timing is off.
+
+--- jsonb: Find functions using multiplication ---
+Timing is on.
+ count 
+-------
+     0
+(1 row)
+
+Time: 2.551 ms
+Timing is off.
+
+--- sexp: Count list operations (car) on AST ---
+Timing is on.
+ERROR:  relation "bench_sexp_ast" does not exist
+LINE 1: SELECT COUNT(*) FROM bench_sexp_ast WHERE car(data) = 'defun...
+                             ^
+Time: 0.039 ms
+Timing is off.
+
+--- jsonb: Count type checks on AST ---
+Timing is on.
+ count 
+-------
+ 20000
+(1 row)
+
+Time: 2.664 ms
+Timing is off.
+
+================================================================================
+TEST 7: DEEPLY NESTED STRUCTURES (100K rows, 15 levels)
+================================================================================
+ERROR:  type "sexp" does not exist
+LINE 1: ...TE TABLE bench_sexp_deep (id serial PRIMARY KEY, data sexp);
+                                                                 ^
+CREATE TABLE
+
+--- sexp: Insert 100K deeply nested (15 levels) ---
+Timing is on.
+ERROR:  relation "bench_sexp_deep" does not exist
+LINE 1: INSERT INTO bench_sexp_deep (data)
+                    ^
+Time: 0.042 ms
+Timing is off.
+
+--- jsonb: Insert 100K deeply nested (15 levels) ---
+Timing is on.
+INSERT 0 10000
+Time: 41.487 ms
+Timing is off.
+
+--- Deep nesting storage sizes ---
+ERROR:  relation "bench_sexp_deep" does not exist
+LINE 3:     pg_size_pretty(pg_total_relation_size('bench_sexp_deep')...
+                                                  ^
+
+--- sexp: Sequential scan of deeply nested data ---
+Timing is on.
+ERROR:  relation "bench_sexp_deep" does not exist
+LINE 1: SELECT COUNT(*) FROM bench_sexp_deep;
+                             ^
+Time: 0.065 ms
+Timing is off.
+
+--- jsonb: Sequential scan of deeply nested data ---
+Timing is on.
+ count 
+-------
+ 10000
+(1 row)
+
+Time: 0.513 ms
+Timing is off.
+
+--- sexp: Find by deep containment ---
+Timing is on.
+ERROR:  relation "bench_sexp_deep" does not exist
+LINE 1: SELECT COUNT(*) FROM bench_sexp_deep WHERE data @> '(value 5...
+                             ^
+Time: 0.035 ms
+Timing is off.
+
+--- jsonb: Find by deep containment ---
+Timing is on.
+ count 
+-------
+    10
+(1 row)
+
+Time: 5.104 ms
+Timing is off.
+
+================================================================================
+TEST 8: GIN INDEX PERFORMANCE (500K rows)
+================================================================================
+ERROR:  type "sexp" does not exist
+LINE 1: ...ATE TABLE bench_sexp_gin (id serial PRIMARY KEY, data sexp);
+                                                                 ^
+CREATE TABLE
+
+--- Inserting 500K rows for GIN benchmark ---
+Timing is on.
+ERROR:  relation "bench_sexp_gin" does not exist
+LINE 1: INSERT INTO bench_sexp_gin (data)
+                    ^
+Time: 0.056 ms
+Timing is off.
+Timing is on.
+INSERT 0 50000
+Time: 202.370 ms
+Timing is off.
+
+--- GIN table sizes (before index) ---
+ERROR:  relation "bench_sexp_gin" does not exist
+LINE 3:     pg_size_pretty(pg_total_relation_size('bench_sexp_gin'))...
+                                                  ^
+
+--- sexp @>>: Containment WITHOUT GIN (seq scan) ---
+Timing is on.
+ERROR:  relation "bench_sexp_gin" does not exist
+LINE 1: SELECT COUNT(*) FROM bench_sexp_gin WHERE data @>> '(event (...
+                             ^
+Time: 0.025 ms
+Timing is off.
+
+--- jsonb @>: Containment WITHOUT GIN (seq scan) ---
+Timing is on.
+ count 
+-------
+  5000
+(1 row)
+
+Time: 5.391 ms
+Timing is off.
+
+--- Creating GIN indexes ---
+Timing is on.
+ERROR:  relation "bench_sexp_gin" does not exist
+Time: 0.071 ms
+Timing is off.
+Timing is on.
+CREATE INDEX
+Time: 894.647 ms
+Timing is off.
+ERROR:  relation "bench_sexp_gin" does not exist
+ANALYZE
+
+--- GIN Index sizes ---
+ERROR:  relation "bench_sexp_gin_idx" does not exist
+LINE 3:     pg_size_pretty(pg_relation_size('bench_sexp_gin_idx')) a...
+                                            ^
+SET
+
+--- sexp @>>: GIN - Find click events (10% selectivity) ---
+Timing is on.
+ERROR:  relation "bench_sexp_gin" does not exist
+LINE 1: SELECT COUNT(*) FROM bench_sexp_gin WHERE data @>> '(event (...
+                             ^
+Time: 0.026 ms
+Timing is off.
+
+--- jsonb @>: GIN - Find click events (10% selectivity) ---
+Timing is on.
+ count 
+-------
+  5000
+(1 row)
+
+Time: 2.007 ms
+Timing is off.
+
+--- sexp @>>: GIN - Find chrome + windows ---
+Timing is on.
+ERROR:  relation "bench_sexp_gin" does not exist
+LINE 1: SELECT COUNT(*) FROM bench_sexp_gin 
+                             ^
+Time: 0.106 ms
+Timing is off.
+
+--- jsonb @>: GIN - Find chrome + windows ---
+Timing is on.
+ count 
+-------
+  4166
+(1 row)
+
+Time: 1.782 ms
+Timing is off.
+
+--- sexp @>>: GIN - Find mobile=true events ---
+Timing is on.
+ERROR:  relation "bench_sexp_gin" does not exist
+LINE 1: SELECT COUNT(*) FROM bench_sexp_gin WHERE data @>> '(propert...
+                             ^
+Time: 0.059 ms
+Timing is off.
+
+--- jsonb @>: GIN - Find mobile=true events ---
+Timing is on.
+ count 
+-------
+ 10000
+(1 row)
+
+Time: 2.300 ms
+Timing is off.
+
+--- sexp @>>: GIN - Find event by ID (highly selective) ---
+Timing is on.
+ERROR:  relation "bench_sexp_gin" does not exist
+LINE 1: SELECT COUNT(*) FROM bench_sexp_gin WHERE data @>> '(event 1...
+                             ^
+Time: 0.028 ms
+Timing is off.
+
+--- jsonb @>: GIN - Find event by ID (highly selective) ---
+Timing is on.
+ count 
+-------
+     1
+(1 row)
+
+Time: 0.111 ms
+Timing is off.
+
+--- sexp @>>: GIN - Complex query (type=purchase AND mobile=true) ---
+Timing is on.
+ERROR:  relation "bench_sexp_gin" does not exist
+LINE 1: SELECT COUNT(*) FROM bench_sexp_gin 
+                             ^
+Time: 0.026 ms
+Timing is off.
+
+--- jsonb @>: GIN - Complex query (type=purchase AND mobile=true) ---
+Timing is on.
+ count 
+-------
+     0
+(1 row)
+
+Time: 0.278 ms
+Timing is off.
+
+================================================================================
+TEST 8b: STRUCTURAL CONTAINMENT WITH GIN (sexp @> only)
+================================================================================
+
+--- sexp @>: GIN - Find by tag symbol "important" (structural) ---
+Timing is on.
+ERROR:  relation "bench_sexp_gin" does not exist
+LINE 1: SELECT COUNT(*) FROM bench_sexp_gin WHERE data @> 'important...
+                             ^
+Time: 0.034 ms
+Timing is off.
+
+--- sexp @>: GIN - Find exact (type "click") sublist ---
+Timing is on.
+ERROR:  relation "bench_sexp_gin" does not exist
+LINE 1: SELECT COUNT(*) FROM bench_sexp_gin WHERE data @> '(type "cl...
+                             ^
+Time: 0.044 ms
+Timing is off.
+SET
+
+================================================================================
+TEST 9: SERIALIZATION/OUTPUT PERFORMANCE (500K rows)
+================================================================================
+
+--- sexp: Serialize all 500K rows to text ---
+Timing is on.
+ERROR:  relation "bench_sexp" does not exist
+LINE 1: SELECT SUM(LENGTH(data::text)) FROM bench_sexp;
+                                            ^
+Time: 0.029 ms
+Timing is off.
+
+--- jsonb: Serialize all 500K rows to text ---
+Timing is on.
+   sum    
+----------
+ 15574961
+(1 row)
+
+Time: 46.860 ms
+Timing is off.
+
+================================================================================
+TEST 10: LIST OPERATIONS ON LARGE DATA (sexp-specific)
+================================================================================
+
+--- sexp: car operation on 500K rows ---
+Timing is on.
+ERROR:  relation "bench_sexp" does not exist
+LINE 1: SELECT COUNT(*) FROM bench_sexp WHERE car(data) = 'record'::...
+                             ^
+Time: 0.079 ms
+Timing is off.
+
+--- sexp: cdr operation on 500K rows ---
+Timing is on.
+ERROR:  relation "bench_sexp" does not exist
+LINE 1: SELECT COUNT(*) FROM bench_sexp WHERE cdr(data) IS NOT NULL;
+                             ^
+Time: 0.021 ms
+Timing is off.
+
+--- sexp: sexp_length on 500K rows ---
+Timing is on.
+ERROR:  relation "bench_sexp" does not exist
+LINE 1: SELECT AVG(sexp_length(data)) FROM bench_sexp;
+                                           ^
+Time: 0.055 ms
+Timing is off.
+
+--- sexp: nth access (element 3 = metadata) on 500K rows ---
+Timing is on.
+Time: 0.020 ms
+Timing is off.
+
+ERROR:  relation "bench_sexp" does not exist
+LINE 1: SELECT COUNT(*) FROM bench_sexp WHERE nth(data, 3) IS NOT NU...
+                             ^
+--- sexp: Deep nth access on 500K rows ---
+Timing is on.
+ERROR:  relation "bench_sexp" does not exist
+LINE 1: SELECT COUNT(*) FROM bench_sexp WHERE car(nth(data, 4)) = 's...
+                             ^
+Time: 0.014 ms
+Timing is off.
+
+================================================================================
+TEST 11: AGGREGATION QUERIES
+================================================================================
+
+--- sexp: Group by first-level element (using car of nth) ---
+Timing is on.
+Time: 0.019 ms
+Timing is off.
+
+ERROR:  relation "bench_sexp" does not exist
+LINE 2: FROM bench_sexp 
+             ^
+--- jsonb: Group by first-level key ---
+Timing is on.
+ user_id | count 
+---------+-------
+ 1       |     1
+ 10      |     1
+ 100     |     1
+ 1000    |     1
+ 10000   |     1
+(5 rows)
+
+Time: 26.867 ms
+Timing is off.
+
+================================================================================
+CLEANUP
+================================================================================
+DROP TABLE
+NOTICE:  table "bench_sexp" does not exist, skipping
+DROP TABLE
+DROP TABLE
+NOTICE:  table "bench_sexp_ast" does not exist, skipping
+DROP TABLE
+DROP TABLE
+NOTICE:  table "bench_sexp_deep" does not exist, skipping
+DROP TABLE
+DROP TABLE
+NOTICE:  table "bench_sexp_gin" does not exist, skipping
+DROP TABLE
+
+================================================================================
+BENCHMARK COMPLETE
+================================================================================

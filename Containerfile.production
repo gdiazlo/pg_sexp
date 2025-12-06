@@ -1,0 +1,311 @@
+# Production container with PostgreSQL 18.1, TimescaleDB, and pg_sexp
+# Based on Alpine Linux for minimal attack surface and smaller image size
+#
+# This container is designed for production use with distributed TimescaleDB clusters.
+# It builds PostgreSQL 18.1 from source and compiles TimescaleDB and pg_sexp against it.
+#
+# Usage:
+#   podman build -f Containerfile.production -t pg_sexp-production .
+#   podman run -d --name tsdb-node1 pg_sexp-production
+#
+# For distributed clusters, see TimescaleDB documentation for multi-node setup.
+
+FROM docker.io/alpine:3.21 AS builder
+
+# PostgreSQL and TimescaleDB versions
+ARG PG_VERSION=18.1
+ARG TIMESCALEDB_VERSION=2.24.0
+
+# Install build dependencies
+RUN apk add --no-cache \
+    build-base \
+    clang \
+    llvm-dev \
+    readline-dev \
+    zlib-dev \
+    openssl-dev \
+    icu-dev \
+    libxml2-dev \
+    libxslt-dev \
+    linux-pam-dev \
+    openldap-dev \
+    krb5-dev \
+    curl-dev \
+    lz4-dev \
+    zstd-dev \
+    util-linux-dev \
+    bison \
+    flex \
+    wget \
+    cmake \
+    git \
+    perl \
+    linux-headers \
+    bash
+
+WORKDIR /build
+
+# Download and build PostgreSQL 18.1
+RUN wget -q https://ftp.postgresql.org/pub/source/v${PG_VERSION}/postgresql-${PG_VERSION}.tar.bz2 && \
+    tar xjf postgresql-${PG_VERSION}.tar.bz2 && \
+    cd postgresql-${PG_VERSION} && \
+    ./configure \
+        --prefix=/usr/local/pgsql \
+        --with-openssl \
+        --with-libxml \
+        --with-libxslt \
+        --with-lz4 \
+        --with-zstd \
+        --with-uuid=e2fs \
+        --with-llvm \
+        CC=clang \
+        LLVM_CONFIG=/usr/bin/llvm-config && \
+    make -j$(nproc) world-bin && \
+    make install-world-bin
+
+# Set up PostgreSQL environment for building extensions
+ENV PATH="/usr/local/pgsql/bin:$PATH"
+ENV LD_LIBRARY_PATH="/usr/local/pgsql/lib:$LD_LIBRARY_PATH"
+
+# Download and build TimescaleDB
+RUN git clone --branch ${TIMESCALEDB_VERSION} --depth 1 \
+        https://github.com/timescale/timescaledb.git && \
+    cd timescaledb && \
+    ./bootstrap -DREGRESS_CHECKS=OFF -DWARNINGS_AS_ERRORS=OFF && \
+    cd build && \
+    make -j$(nproc) && \
+    make install
+
+# Build pg_sexp extension
+WORKDIR /build/pg_sexp
+COPY src/ src/
+COPY sql/ sql/
+COPY Makefile pg_sexp.control ./
+
+RUN make clean && make CC=clang CFLAGS="-O3 -fno-strict-aliasing" && make install
+
+# ============================================================================
+# Production runtime image (minimal Alpine)
+# ============================================================================
+FROM docker.io/alpine:3.21
+
+ARG PG_VERSION=18.1
+
+# Install runtime dependencies only
+RUN apk add --no-cache \
+    readline \
+    zlib \
+    openssl \
+    icu-libs \
+    libxml2 \
+    libxslt \
+    linux-pam \
+    libldap \
+    krb5-libs \
+    libcurl \
+    lz4-libs \
+    zstd-libs \
+    libuuid \
+    llvm19-libs \
+    su-exec \
+    tzdata \
+    && rm -rf /var/cache/apk/*
+
+# Copy PostgreSQL from builder
+COPY --from=builder /usr/local/pgsql /usr/local/pgsql
+
+# Set up PostgreSQL environment
+ENV PATH="/usr/local/pgsql/bin:$PATH"
+ENV LD_LIBRARY_PATH="/usr/local/pgsql/lib"
+ENV PGDATA="/var/lib/postgresql/data"
+ENV LANG=en_US.UTF-8
+
+# Create postgres user and directories
+RUN addgroup -g 70 -S postgres && \
+    adduser -u 70 -S -D -G postgres -H -h /var/lib/postgresql -s /bin/sh postgres && \
+    mkdir -p /var/lib/postgresql/data && \
+    mkdir -p /var/run/postgresql && \
+    mkdir -p /docker-entrypoint-initdb.d && \
+    chown -R postgres:postgres /var/lib/postgresql /var/run/postgresql
+
+# Create entrypoint script
+COPY --chmod=755 <<'EOF' /docker-entrypoint.sh
+#!/bin/sh
+set -e
+
+# Handle signals properly
+trap "echo 'Caught signal'; su-exec postgres pg_ctl -D $PGDATA stop -m fast; exit 0" TERM INT
+
+# Initialize database if needed
+if [ ! -s "$PGDATA/PG_VERSION" ]; then
+    echo "Initializing PostgreSQL..."
+    
+    # Initialize with default settings
+    su-exec postgres initdb -D "$PGDATA" \
+        --auth-host=scram-sha-256 \
+        --auth-local=trust \
+        --encoding=UTF8
+
+    # Configure PostgreSQL for production
+    cat >> "$PGDATA/postgresql.conf" << 'PGCONF'
+# Connection settings
+listen_addresses = '*'
+max_connections = 200
+
+# Memory settings (adjust based on available RAM)
+shared_buffers = 256MB
+effective_cache_size = 1GB
+work_mem = 16MB
+maintenance_work_mem = 128MB
+
+# WAL settings
+wal_level = replica
+max_wal_senders = 10
+wal_keep_size = 1GB
+
+# TimescaleDB settings
+shared_preload_libraries = 'timescaledb'
+timescaledb.telemetry_level = off
+timescaledb.max_background_workers = 8
+
+# Logging
+log_destination = 'stderr'
+logging_collector = on
+log_directory = 'pg_log'
+log_filename = 'postgresql-%Y-%m-%d_%H%M%S.log'
+log_rotation_age = 1d
+log_rotation_size = 100MB
+log_min_messages = warning
+log_min_error_statement = error
+
+# Performance
+checkpoint_completion_target = 0.9
+default_statistics_target = 100
+random_page_cost = 1.1
+effective_io_concurrency = 200
+PGCONF
+
+    # Configure pg_hba.conf for network access
+    cat > "$PGDATA/pg_hba.conf" << 'PGHBA'
+# TYPE  DATABASE        USER            ADDRESS                 METHOD
+local   all             all                                     trust
+host    all             all             127.0.0.1/32            scram-sha-256
+host    all             all             ::1/128                 scram-sha-256
+host    all             all             0.0.0.0/0               scram-sha-256
+host    replication     all             0.0.0.0/0               scram-sha-256
+PGHBA
+
+    # Run initialization scripts
+    su-exec postgres pg_ctl -D "$PGDATA" -l /tmp/pg_init.log start -w
+    
+    for f in /docker-entrypoint-initdb.d/*; do
+        case "$f" in
+            *.sh)
+                echo "Running $f"
+                . "$f"
+                ;;
+            *.sql)
+                echo "Running $f"
+                su-exec postgres psql -f "$f"
+                ;;
+            *.sql.gz)
+                echo "Running $f"
+                gunzip -c "$f" | su-exec postgres psql
+                ;;
+        esac
+    done
+    
+    su-exec postgres pg_ctl -D "$PGDATA" stop -m fast
+    
+    echo "PostgreSQL initialization complete."
+fi
+
+# Start PostgreSQL
+echo "Starting PostgreSQL..."
+exec su-exec postgres postgres -D "$PGDATA"
+EOF
+
+# Create initialization script that loads extensions
+COPY --chmod=644 <<'EOF' /docker-entrypoint-initdb.d/00-init-extensions.sql
+-- Create extensions in template1 so they're available in all new databases
+\c template1
+
+-- Enable TimescaleDB
+CREATE EXTENSION IF NOT EXISTS timescaledb CASCADE;
+
+-- Enable pg_sexp
+CREATE EXTENSION IF NOT EXISTS pg_sexp;
+
+-- Create default database with extensions
+\c postgres
+
+CREATE DATABASE tsdb;
+\c tsdb
+
+CREATE EXTENSION IF NOT EXISTS timescaledb CASCADE;
+CREATE EXTENSION IF NOT EXISTS pg_sexp;
+
+-- Verify installation
+SELECT 'PostgreSQL' as component, version();
+SELECT 'TimescaleDB' as component, extversion as version FROM pg_extension WHERE extname = 'timescaledb';
+SELECT 'pg_sexp' as component, extversion as version FROM pg_extension WHERE extname = 'pg_sexp';
+EOF
+
+# Create helper script for distributed setup
+COPY --chmod=755 <<'EOF' /usr/local/bin/setup-distributed-node
+#!/bin/sh
+# Helper script to configure a node for distributed TimescaleDB
+# Usage: setup-distributed-node [access|data] <node_name> <password>
+
+set -e
+
+NODE_TYPE=${1:-data}
+NODE_NAME=${2:-$(hostname)}
+PASSWORD=${3:-changeme}
+
+if [ "$NODE_TYPE" = "access" ]; then
+    echo "Configuring as ACCESS NODE..."
+    
+    # Access node configuration
+    cat >> "$PGDATA/postgresql.conf" << CONF
+# Access node specific settings
+enable_partitionwise_aggregate = on
+jit = off
+CONF
+
+    psql -U postgres -d tsdb << SQL
+-- Create extension for distributed hypertables
+SELECT add_data_node('$NODE_NAME', host => 'localhost', password => '$PASSWORD');
+SQL
+
+elif [ "$NODE_TYPE" = "data" ]; then
+    echo "Configuring as DATA NODE..."
+    
+    # Data node configuration
+    cat >> "$PGDATA/postgresql.conf" << CONF
+# Data node specific settings  
+max_prepared_transactions = 150
+wal_level = logical
+CONF
+
+    # Restart to apply changes
+    pg_ctl -D "$PGDATA" restart -m fast
+    
+    echo "Data node configured. Add this node to your access node with:"
+    echo "SELECT add_data_node('$NODE_NAME', host => '<this_host>', password => '$PASSWORD');"
+fi
+
+echo "Distributed node setup complete."
+EOF
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
+    CMD su-exec postgres pg_isready -U postgres || exit 1
+
+# Expose PostgreSQL port
+EXPOSE 5432
+
+# Volume for data persistence
+VOLUME ["/var/lib/postgresql/data"]
+
+ENTRYPOINT ["/docker-entrypoint.sh"]

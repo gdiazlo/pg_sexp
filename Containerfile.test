@@ -1,0 +1,208 @@
+# Test container for pg_sexp extension with PostgreSQL 18.1
+# Based on Alpine Linux for minimal attack surface
+# Usage: podman build -f Containerfile.test -t pg_sexp-test .
+#        podman run --rm pg_sexp-test
+
+FROM docker.io/alpine:3.21 AS builder
+
+ARG PG_VERSION=18.1
+
+# Install build dependencies
+RUN apk add --no-cache \
+    build-base \
+    clang \
+    llvm-dev \
+    readline-dev \
+    zlib-dev \
+    openssl-dev \
+    icu-dev \
+    bison \
+    flex \
+    wget \
+    perl \
+    linux-headers
+
+WORKDIR /build
+
+# Download and build PostgreSQL 18.1
+RUN wget -q https://ftp.postgresql.org/pub/source/v${PG_VERSION}/postgresql-${PG_VERSION}.tar.bz2 && \
+    tar xjf postgresql-${PG_VERSION}.tar.bz2 && \
+    cd postgresql-${PG_VERSION} && \
+    ./configure \
+        --prefix=/usr/local/pgsql \
+        --with-openssl \
+        --with-llvm \
+        CC=clang \
+        LLVM_CONFIG=/usr/bin/llvm-config && \
+    make -j$(nproc) && \
+    make install
+
+# Set up PostgreSQL environment for building extensions
+ENV PATH="/usr/local/pgsql/bin:$PATH"
+ENV LD_LIBRARY_PATH="/usr/local/pgsql/lib"
+
+# Build pg_sexp extension
+WORKDIR /build/pg_sexp
+COPY src/ src/
+COPY sql/ sql/
+COPY Makefile pg_sexp.control ./
+
+RUN make clean && make CC=clang && make install
+
+# Copy test files
+COPY test/ test/
+
+# ============================================================================
+# Runtime image
+# ============================================================================
+FROM docker.io/alpine:3.21
+
+ARG PG_VERSION=18.1
+
+# Install runtime dependencies
+RUN apk add --no-cache \
+    readline \
+    zlib \
+    openssl \
+    icu-libs \
+    llvm19-libs \
+    su-exec
+
+# Copy PostgreSQL from builder
+COPY --from=builder /usr/local/pgsql /usr/local/pgsql
+COPY --from=builder /build/pg_sexp/test /test
+
+# Set up PostgreSQL environment
+ENV PATH="/usr/local/pgsql/bin:$PATH"
+ENV LD_LIBRARY_PATH="/usr/local/pgsql/lib"
+ENV PGDATA="/tmp/pgdata"
+
+# Create postgres user and directories
+RUN addgroup -g 70 -S postgres && \
+    adduser -u 70 -S -D -G postgres -H -h /var/lib/postgresql -s /bin/sh postgres && \
+    mkdir -p /var/run/postgresql && \
+    mkdir -p /tmp/pgdata && \
+    mkdir -p /results && \
+    chown -R postgres:postgres /var/run/postgresql /tmp/pgdata /results /test
+
+# Set up test script - uses Unix socket only, no TCP port exposure
+COPY --chmod=755 <<'EOF' /run-tests.sh
+#!/bin/sh
+set -e
+
+# Initialize database cluster
+echo "Initializing PostgreSQL 18.1..."
+su-exec postgres initdb -D /tmp/pgdata --auth=trust --no-locale --encoding=UTF8
+
+# Configure PostgreSQL to use Unix socket only (no TCP)
+cat >> /tmp/pgdata/postgresql.conf << 'PGCONF'
+listen_addresses = ''
+unix_socket_directories = '/var/run/postgresql'
+PGCONF
+
+# Start PostgreSQL
+echo "Starting PostgreSQL..."
+su-exec postgres pg_ctl -D /tmp/pgdata -l /tmp/pg.log start
+
+# Wait for PostgreSQL to be ready (using socket)
+echo "Waiting for PostgreSQL to start..."
+while ! su-exec postgres pg_isready -h /var/run/postgresql >/dev/null 2>&1; do
+    sleep 1
+done
+echo "PostgreSQL is ready!"
+
+# Create test database and run tests
+su-exec postgres createdb -h /var/run/postgresql testdb
+su-exec postgres psql -h /var/run/postgresql -d testdb -c "CREATE EXTENSION pg_sexp;"
+echo "Running basic tests..."
+su-exec postgres psql -h /var/run/postgresql -d testdb -f /test/test_basic.sql
+
+echo ""
+echo "Running robustness tests..."
+su-exec postgres psql -h /var/run/postgresql -d testdb -f /test/test_robustness.sql
+
+# Cleanup
+su-exec postgres pg_ctl -D /tmp/pgdata stop
+echo "Tests completed!"
+EOF
+
+# Set up benchmark script
+COPY --chmod=755 <<'EOF' /run-benchmark.sh
+#!/bin/sh
+set -e
+
+RESULTS_FILE="/tmp/benchmark_results.txt"
+
+# Initialize database cluster
+echo "Initializing PostgreSQL 18.1..."
+su-exec postgres initdb -D /tmp/pgdata --auth=trust --no-locale --encoding=UTF8
+
+# Configure PostgreSQL for benchmarking
+cat >> /tmp/pgdata/postgresql.conf << 'PGCONF'
+listen_addresses = ''
+unix_socket_directories = '/var/run/postgresql'
+shared_buffers = 256MB
+work_mem = 64MB
+maintenance_work_mem = 128MB
+effective_cache_size = 512MB
+PGCONF
+
+# Start PostgreSQL
+echo "Starting PostgreSQL..."
+su-exec postgres pg_ctl -D /tmp/pgdata -l /tmp/pg.log start
+
+# Wait for PostgreSQL to be ready
+echo "Waiting for PostgreSQL to start..."
+while ! su-exec postgres pg_isready -h /var/run/postgresql >/dev/null 2>&1; do
+    sleep 1
+done
+echo "PostgreSQL is ready!"
+
+# Create benchmark database
+su-exec postgres createdb -h /var/run/postgresql benchdb
+su-exec postgres psql -h /var/run/postgresql -d benchdb -c "CREATE EXTENSION pg_sexp;"
+
+# Write header to results file
+{
+    echo "=============================================="
+    echo "BENCHMARK RESULTS"
+    echo "Date: $(date -Iseconds)"
+    echo "=============================================="
+    echo ""
+    echo "=== SYSTEM INFORMATION ==="
+    echo ""
+    echo "CPU Info:"
+    cat /proc/cpuinfo | grep "model name" | head -1
+    echo ""
+    echo "CPU Cores: $(nproc)"
+    echo ""
+    echo "Memory:"
+    free -h | head -2
+    echo ""
+    echo "Kernel: $(uname -r)"
+    echo ""
+} > "$RESULTS_FILE"
+
+echo "Running benchmark..."
+su-exec postgres psql -h /var/run/postgresql -d benchdb -f /test/benchmark.sql >> "$RESULTS_FILE" 2>&1
+
+# Add footer
+{
+    echo ""
+    echo "=============================================="
+    echo "Benchmark completed at: $(date -Iseconds)"
+    echo "=============================================="
+} >> "$RESULTS_FILE"
+
+# Cleanup
+su-exec postgres pg_ctl -D /tmp/pgdata stop
+
+echo ""
+echo "Benchmark completed!"
+echo ""
+# Output results to stdout so they can be captured
+cat "$RESULTS_FILE"
+EOF
+
+# Run tests at container startup (default)
+CMD ["/run-tests.sh"]

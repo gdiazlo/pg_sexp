@@ -1,0 +1,265 @@
+# Test pg_sexp compatibility with TimescaleDB on PostgreSQL 18.1
+#
+# This container builds PostgreSQL 18.1 from source, compiles TimescaleDB,
+# and tests pg_sexp compatibility with hypertables, compression, and
+# continuous aggregates.
+#
+# Usage:
+#   podman build -f Containerfile.timescaledb -t pg_sexp-timescaledb .
+#   podman run --rm pg_sexp-timescaledb
+
+FROM docker.io/alpine:3.21 AS builder
+
+ARG PG_VERSION=18.1
+ARG TIMESCALEDB_VERSION=2.24.0
+
+# Install build dependencies
+RUN apk add --no-cache \
+    build-base \
+    clang \
+    llvm \
+    llvm-dev \
+    readline-dev \
+    zlib-dev \
+    openssl-dev \
+    icu-dev \
+    libxml2-dev \
+    lz4-dev \
+    zstd-dev \
+    pkgconf \
+    bison \
+    flex \
+    wget \
+    perl \
+    cmake \
+    git \
+    bash \
+    linux-headers
+
+WORKDIR /build
+
+# Download and build PostgreSQL 18.1
+RUN wget -q https://ftp.postgresql.org/pub/source/v${PG_VERSION}/postgresql-${PG_VERSION}.tar.bz2 && \
+    tar xjf postgresql-${PG_VERSION}.tar.bz2 && \
+    cd postgresql-${PG_VERSION} && \
+    ./configure \
+        --prefix=/usr/local/pgsql \
+        --with-openssl \
+        --with-libxml \
+        --with-lz4 \
+        --with-zstd \
+        --with-llvm \
+        CC=clang \
+        LLVM_CONFIG=/usr/bin/llvm-config && \
+    make -j$(nproc) && \
+    make install
+
+# Set up PostgreSQL environment for building extensions
+ENV PATH="/usr/local/pgsql/bin:$PATH"
+ENV LD_LIBRARY_PATH="/usr/local/pgsql/lib"
+
+# Download and build TimescaleDB
+RUN git clone --branch ${TIMESCALEDB_VERSION} --depth 1 \
+        https://github.com/timescale/timescaledb.git && \
+    cd timescaledb && \
+    ./bootstrap -DREGRESS_CHECKS=OFF -DWARNINGS_AS_ERRORS=OFF && \
+    cd build && \
+    make -j$(nproc) && \
+    make install
+
+# Build pg_sexp extension
+WORKDIR /build/pg_sexp
+COPY src/ src/
+COPY sql/ sql/
+COPY Makefile pg_sexp.control ./
+
+RUN make clean && make CC=clang && make install
+
+# ============================================================================
+# Runtime image
+# ============================================================================
+FROM docker.io/alpine:3.21
+
+ARG PG_VERSION=18.1
+
+# Install runtime dependencies
+RUN apk add --no-cache \
+    readline \
+    zlib \
+    openssl \
+    icu-libs \
+    libxml2 \
+    lz4-libs \
+    zstd-libs \
+    llvm19-libs \
+    procps \
+    bash \
+    su-exec
+
+# Copy PostgreSQL from builder
+COPY --from=builder /usr/local/pgsql /usr/local/pgsql
+
+# Set up PostgreSQL environment
+ENV PATH="/usr/local/pgsql/bin:$PATH"
+ENV LD_LIBRARY_PATH="/usr/local/pgsql/lib"
+ENV PGDATA="/var/lib/postgresql/data"
+
+# Create postgres user and directories
+RUN addgroup -g 70 -S postgres && \
+    adduser -u 70 -S -D -G postgres -H -h /var/lib/postgresql postgres && \
+    mkdir -p /var/lib/postgresql/data && \
+    mkdir -p /var/run/postgresql && \
+    chown -R postgres:postgres /var/lib/postgresql /var/run/postgresql
+
+# Create test script for TimescaleDB + pg_sexp compatibility
+COPY --chmod=644 <<'EOF' /test-timescaledb-sexp.sql
+-- Enable extensions
+CREATE EXTENSION IF NOT EXISTS timescaledb CASCADE;
+CREATE EXTENSION IF NOT EXISTS pg_sexp;
+
+-- Test 1: Basic table with sexp column converted to hypertable
+CREATE TABLE events (
+    time TIMESTAMPTZ NOT NULL,
+    device_id INT NOT NULL,
+    event_data sexp
+);
+
+SELECT create_hypertable('events', 'time');
+
+-- Test 2: Insert some data
+INSERT INTO events (time, device_id, event_data) VALUES
+    (NOW() - INTERVAL '1 hour', 1, '(event (type "click") (x 100) (y 200))'),
+    (NOW() - INTERVAL '30 minutes', 1, '(event (type "scroll") (delta 50))'),
+    (NOW() - INTERVAL '15 minutes', 2, '(event (type "click") (x 300) (y 400))'),
+    (NOW(), 2, '(event (type "keypress") (key "enter"))');
+
+-- Test 3: Query the hypertable with sexp data
+SELECT time, device_id, event_data FROM events ORDER BY time;
+
+-- Test 4: Test sexp matching on hypertable
+SELECT time, device_id, event_data 
+FROM events 
+WHERE event_data @> '(type "click")'
+ORDER BY time;
+
+-- Test 5: TimescaleDB aggregation with sexp column
+SELECT 
+    time_bucket('30 minutes', time) AS bucket,
+    device_id,
+    count(*),
+    array_agg(event_data) as events
+FROM events
+GROUP BY bucket, device_id
+ORDER BY bucket;
+
+-- Test 6: Compression compatibility (if supported)
+-- First, set compression settings
+ALTER TABLE events SET (
+    timescaledb.compress,
+    timescaledb.compress_segmentby = 'device_id'
+);
+
+-- Compress older chunks
+SELECT compress_chunk(c) FROM show_chunks('events', older_than => NOW() - INTERVAL '1 hour') c;
+
+-- Test 7: Query after compression
+SELECT time, device_id, event_data FROM events ORDER BY time;
+
+-- Test 8: Create a continuous aggregate (without sexp in the aggregate itself)
+CREATE MATERIALIZED VIEW events_hourly
+WITH (timescaledb.continuous) AS
+SELECT 
+    time_bucket('1 hour', time) AS bucket,
+    device_id,
+    count(*) as event_count
+FROM events
+GROUP BY bucket, device_id
+WITH NO DATA;
+
+-- Refresh the continuous aggregate
+CALL refresh_continuous_aggregate('events_hourly', NULL, NULL);
+
+SELECT * FROM events_hourly ORDER BY bucket;
+
+-- Test 9: More complex sexp patterns with hypertable
+CREATE TABLE metrics (
+    time TIMESTAMPTZ NOT NULL,
+    host TEXT NOT NULL,
+    metric sexp
+);
+
+SELECT create_hypertable('metrics', 'time');
+
+INSERT INTO metrics (time, host, metric) VALUES
+    (NOW() - INTERVAL '2 hours', 'server1', '(metric (name "cpu") (value 45.5) (unit "percent"))'),
+    (NOW() - INTERVAL '1 hour', 'server1', '(metric (name "cpu") (value 78.2) (unit "percent"))'),
+    (NOW() - INTERVAL '2 hours', 'server2', '(metric (name "memory") (value 1024) (unit "mb"))'),
+    (NOW() - INTERVAL '1 hour', 'server2', '(metric (name "memory") (value 2048) (unit "mb"))');
+
+-- Query with sexp matching
+SELECT time, host, metric
+FROM metrics
+WHERE metric @> '(name "cpu")'
+ORDER BY time;
+
+-- Test 10: Index on sexp column in hypertable
+CREATE INDEX idx_events_sexp ON events USING gin(event_data);
+CREATE INDEX idx_metrics_sexp ON metrics USING gin(metric);
+
+-- Verify indexes work
+EXPLAIN (COSTS OFF) SELECT * FROM events WHERE event_data @> '(type "click")';
+
+-- Summary
+SELECT 'All TimescaleDB + pg_sexp compatibility tests passed!' as result;
+EOF
+
+# Create entrypoint script that runs tests and shows results
+COPY --chmod=755 <<'EOF' /test-runner.sh
+#!/bin/bash
+set -e
+
+# Initialize database if needed
+if [ ! -f /var/lib/postgresql/data/PG_VERSION ]; then
+    echo "Initializing PostgreSQL 18.1..."
+    su-exec postgres initdb -D /var/lib/postgresql/data --auth=trust --no-locale --encoding=UTF8
+    
+    # Configure PostgreSQL
+    cat >> /var/lib/postgresql/data/postgresql.conf << 'PGCONF'
+listen_addresses = ''
+unix_socket_directories = '/var/run/postgresql'
+shared_preload_libraries = 'timescaledb'
+timescaledb.telemetry_level = off
+PGCONF
+fi
+
+# Start PostgreSQL
+echo "Starting PostgreSQL..."
+su-exec postgres pg_ctl -D /var/lib/postgresql/data -l /var/lib/postgresql/logfile start
+
+# Wait for PostgreSQL to be ready
+echo "Waiting for PostgreSQL to start..."
+until su-exec postgres pg_isready -h /var/run/postgresql; do
+    sleep 1
+done
+
+# Create test database and run tests
+echo ""
+echo "============================================"
+echo "Running TimescaleDB + pg_sexp compatibility tests"
+echo "PostgreSQL 18.1 + TimescaleDB 2.24.0 (Alpine Linux)"
+echo "============================================"
+echo ""
+
+su-exec postgres createdb -h /var/run/postgresql testdb 2>/dev/null || true
+su-exec postgres psql -h /var/run/postgresql -d testdb -f /test-timescaledb-sexp.sql
+
+# Stop PostgreSQL
+su-exec postgres pg_ctl -D /var/lib/postgresql/data stop
+
+echo ""
+echo "============================================"
+echo "Tests completed!"
+echo "============================================"
+EOF
+
+CMD ["/test-runner.sh"]

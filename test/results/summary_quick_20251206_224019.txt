@@ -1,0 +1,123 @@
+================================================================================
+pg_sexp Benchmark Summary
+Generated: sáb 06 dic 2025 22:41:00 CET
+Image: localhost/pg_sexp-production
+================================================================================
+
+## POSTGRESQL VERSION
+PostgreSQL 18.1 on x86_64-pc-linux-musl, compiled by Alpine clang version 19.1.4, 64-bit
+
+## STORAGE COMPARISON
+
+ sexp  | 21 MB      | 20 MB      |     50000
+ jsonb | 24 MB      | 23 MB      |     50000
+
+ sexp  |           409
+ jsonb |           481
+
+## TIMING RESULTS
+
+Test                                                                 Time (ms)
+----------------------------------------------------------------- ------------
+sexp: Inserting 50,000 rows                                            310.220
+jsonb: Inserting 50,000 rows                                           311.709
+sexp: Full table scan with COUNT                                         2.350
+jsonb: Full table scan with COUNT                                        3.100
+sexp: Full table scan with SUM of data length                           30.267
+jsonb: Full table scan with SUM of data length                          42.187
+sexp: Access first element (car)                                         8.384
+jsonb: Access first-level key                                            4.561
+sexp: Access nested element (nth 2 = user info)                          6.137
+jsonb: Access nested element (user object)                               4.610
+sexp: Deep nested access (user -> id) via car/cdr                       14.910
+jsonb: Deep nested access (user -> id)                                   5.515
+sexp @>>: Filter by settings.theme = dark (33% selectivity)             17.447
+jsonb @>: Filter by settings.theme = dark (33% selectivity)              5.635
+sexp @>>: Filter by user.id = 12345 (highly selective)                  16.902
+jsonb @>: Filter by user.id = 12345 (highly selective)                   5.149
+sexp @>>: Multi-condition (settings.theme=dark AND notifications=       14.833
+jsonb @>: Multi-condition (settings.theme=dark AND notifications=        5.601
+sexp @>: Find exact (theme "dark") sublist anywhere                     13.117
+sexp @>: Find symbol alpha anywhere                                     14.152
+sexp @>: Find string "dark" anywhere                                    10.976
+sexp: Insert 200K AST-like expressions                                 116.733
+jsonb: Insert 200K AST-like structures                                 312.603
+sexp: Find all functions with "let" binding                              4.000
+jsonb: Find all functions with "let" type                                4.922
+sexp: Find functions with "cond" form                                    6.945
+jsonb: Find functions with "cond" type                                  31.600
+sexp: Find functions using multiplication (*)                            8.169
+jsonb: Find functions using multiplication                               3.166
+sexp: Count list operations (car) on AST                                 4.334
+jsonb: Count type checks on AST                                          3.549
+sexp: Insert 100K deeply nested (15 levels)                             42.537
+jsonb: Insert 100K deeply nested (15 levels)                            41.137
+sexp: Sequential scan of deeply nested data                              0.799
+jsonb: Sequential scan of deeply nested data                             0.600
+sexp: Find by deep containment                                           4.921
+jsonb: Find by deep containment                                          5.884
+Inserting 500K rows for GIN benchmark                                  237.049
+sexp @>>: Containment WITHOUT GIN (seq scan)                            12.486
+jsonb @>: Containment WITHOUT GIN (seq scan)                             5.383
+Creating GIN indexes                                                   987.995
+sexp @>>: GIN - Find click events (10% selectivity)                      3.220
+jsonb @>: GIN - Find click events (10% selectivity)                      1.893
+sexp @>>: GIN - Find chrome + windows                                    4.111
+jsonb @>: GIN - Find chrome + windows                                    2.141
+sexp @>>: GIN - Find mobile=true events                                  4.892
+jsonb @>: GIN - Find mobile=true events                                  3.212
+sexp @>>: GIN - Find event by ID (highly selective)                      0.238
+jsonb @>: GIN - Find event by ID (highly selective)                      0.097
+sexp @>>: GIN - Complex query (type=purchase AND mobile=true)            1.627
+jsonb @>: GIN - Complex query (type=purchase AND mobile=true)            0.229
+sexp @>: GIN - Find by tag symbol "important" (structural)               5.871
+sexp @>: GIN - Find exact (type "click") sublist                         2.217
+sexp: Serialize all 500K rows to text                                   73.769
+jsonb: Serialize all 500K rows to text                                  53.027
+sexp: car operation on 500K rows                                        14.957
+sexp: cdr operation on 500K rows                                        52.063
+sexp: sexp_length on 500K rows                                           9.069
+sexp: nth access (element 3 = metadata) on 500K rows                    12.117
+sexp: Deep nth access on 500K rows                                      20.705
+sexp: Group by first-level element (using car of nth)                   22.535
+jsonb: Group by first-level key                                         33.754
+
+## GIN INDEX SIZES
+
+ sexp_gin  | 18 MB
+ jsonb_gin | 9824 kB
+
+## AST STORAGE SIZES
+
+ sexp_ast  | 6888 kB    | 6400 kB
+ jsonb_ast | 27 MB      | 26 MB
+
+## DEEP NESTING STORAGE SIZES
+
+ sexp_deep  | 2848 kB    | 2576 kB
+ jsonb_deep | 4488 kB    | 4216 kB
+
+## PERFORMANCE COMPARISON (sexp vs jsonb)
+
+Operation                                             sexp (ms)   jsonb (ms)      Ratio
+-------------------------------------------------- ------------ ------------ ----------
+Inserting 50,000 rows                                   310.220      311.709      1.00x
+Full table scan with COUNT                                2.350        3.100      1.32x
+Full table scan with SUM of data length                  30.267       42.187      1.39x
+Access first element (car)                                8.384        4.561      0.54x
+Access nested element (nth 2 = user info)                 6.137        4.610      0.75x
+Deep nested access (user -> id) via car/cdr              14.910        5.515      0.37x
+Insert 200K AST-like expressions                        116.733      312.603      2.68x
+Find all functions with "let" binding                     4.000        4.922      1.23x
+Find functions with "cond" form                           6.945       31.600      4.55x
+Find functions using multiplication (*)                   8.169        3.166      0.39x
+Count list operations (car) on AST                        4.334        3.549      0.82x
+Insert 100K deeply nested (15 levels)                    42.537       41.137      0.97x
+Sequential scan of deeply nested data                     0.799        0.600      0.75x
+Find by deep containment                                  4.921        5.884      1.20x
+Serialize all 500K rows to text                          73.769       53.027      0.72x
+Group by first-level element (using car of nth)          22.535       33.754      1.50x
+
+================================================================================
+Full results: /home/gdiazlo/data/src/pg_sexp/test/results/benchmark_quick_20251206_224019.txt
+================================================================================

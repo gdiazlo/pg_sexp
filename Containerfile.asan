@@ -1,0 +1,284 @@
+# AddressSanitizer test container for pg_sexp extension with PostgreSQL 18.1
+#
+# Builds and tests the extension with AddressSanitizer (ASan) enabled.
+# ASan detects buffer overflows, use-after-free, memory leaks, and other
+# memory errors at runtime.
+#
+# Usage:
+#   podman build -f Containerfile.asan -t pg_sexp-asan .
+#   podman run --rm pg_sexp-asan              # Run tests with ASan
+#   podman run --rm -it pg_sexp-asan sh       # Interactive shell
+#
+# Note: ASan adds ~2x slowdown but catches most memory errors.
+
+FROM docker.io/alpine:3.21 AS builder
+
+ARG PG_VERSION=18.1
+
+# Install build dependencies
+RUN apk add --no-cache \
+    build-base \
+    clang \
+    clang-dev \
+    compiler-rt \
+    llvm \
+    llvm-dev \
+    readline-dev \
+    zlib-dev \
+    openssl-dev \
+    icu-dev \
+    pkgconf \
+    bison \
+    flex \
+    wget \
+    perl \
+    linux-headers
+
+WORKDIR /build
+
+# Download and build PostgreSQL 18.1
+RUN wget -q https://ftp.postgresql.org/pub/source/v${PG_VERSION}/postgresql-${PG_VERSION}.tar.bz2 && \
+    tar xjf postgresql-${PG_VERSION}.tar.bz2 && \
+    cd postgresql-${PG_VERSION} && \
+    ./configure \
+        --prefix=/usr/local/pgsql \
+        --with-openssl \
+        --with-llvm \
+        --enable-debug \
+        CC=clang \
+        LLVM_CONFIG=/usr/bin/llvm-config && \
+    make -j$(nproc) && \
+    make install
+
+# Set up PostgreSQL environment for building extensions
+ENV PATH="/usr/local/pgsql/bin:$PATH"
+ENV LD_LIBRARY_PATH="/usr/local/pgsql/lib"
+
+# Build pg_sexp extension with AddressSanitizer
+WORKDIR /build/pg_sexp
+COPY src/ src/
+COPY sql/ sql/
+COPY Makefile pg_sexp.control ./
+
+# Build with ASan - use clang for better ASan support
+# -fsanitize=address: Enable AddressSanitizer
+# -fno-omit-frame-pointer: Better stack traces
+# -g: Debug symbols for useful error messages
+RUN make clean all CC=clang \
+    CFLAGS="-fsanitize=address -fno-omit-frame-pointer -g -O1" \
+    LDFLAGS="-fsanitize=address" && \
+    make install
+
+# Copy test files
+COPY test/ test/
+
+# ============================================================================
+# Runtime image
+# ============================================================================
+FROM docker.io/alpine:3.21
+
+ARG PG_VERSION=18.1
+
+# Install runtime dependencies
+RUN apk add --no-cache \
+    readline \
+    zlib \
+    openssl \
+    icu-libs \
+    llvm19-libs \
+    clang \
+    compiler-rt \
+    procps \
+    bash
+
+# Copy PostgreSQL from builder
+COPY --from=builder /usr/local/pgsql /usr/local/pgsql
+COPY --from=builder /build/pg_sexp/test /test
+
+# Set up PostgreSQL environment
+ENV PATH="/usr/local/pgsql/bin:$PATH"
+ENV LD_LIBRARY_PATH="/usr/local/pgsql/lib"
+ENV PGDATA="/tmp/pgdata"
+
+# Create postgres user and directories
+RUN addgroup -g 70 -S postgres && \
+    adduser -u 70 -S -D -G postgres -H -h /var/lib/postgresql postgres && \
+    mkdir -p /var/run/postgresql && \
+    mkdir -p /tmp/pgdata && \
+    chown -R postgres:postgres /var/run/postgresql /tmp/pgdata /test
+
+# Set up test script - uses Unix socket only, no TCP port exposure
+COPY --chmod=755 <<'EOF' /run-tests.sh
+#!/bin/bash
+set -e
+
+echo "=============================================="
+echo "AddressSanitizer pg_sexp Extension Tests"
+echo "PostgreSQL 18.1 (Alpine Linux)"
+echo "=============================================="
+echo ""
+
+# Find and preload ASan runtime (needed because PostgreSQL wasn't built with ASan)
+ASAN_LIB=$(clang -print-file-name=libclang_rt.asan-x86_64.so 2>/dev/null || find /usr/lib -name 'libclang_rt.asan*.so' 2>/dev/null | head -1)
+if [ -n "$ASAN_LIB" ] && [ -f "$ASAN_LIB" ]; then
+    export LD_PRELOAD="$ASAN_LIB"
+    echo "Using ASan runtime: $ASAN_LIB"
+else
+    echo "WARNING: Could not find ASan runtime, continuing without preload"
+fi
+echo ""
+
+# ASan options:
+# - detect_leaks=0: Disable leak detection (PostgreSQL has many intentional "leaks")
+# - abort_on_error=0: Don't abort on first error, continue testing
+# - print_legend=1: Print ASan legend at the end
+# - halt_on_error=0: Continue after errors to see all issues
+# - verify_asan_link_order=0: Allow preloaded ASan
+export ASAN_OPTIONS="detect_leaks=0:abort_on_error=0:print_legend=1:halt_on_error=0:log_path=/tmp/asan:verify_asan_link_order=0"
+
+# Initialize database cluster
+echo "Initializing PostgreSQL..."
+initdb -D /tmp/pgdata --auth=trust --no-locale --encoding=UTF8
+
+# Configure PostgreSQL to use Unix socket only (no TCP)
+cat >> /tmp/pgdata/postgresql.conf << 'PGCONF'
+listen_addresses = ''
+unix_socket_directories = '/var/run/postgresql'
+PGCONF
+
+# Start PostgreSQL
+echo "Starting PostgreSQL..."
+pg_ctl -D /tmp/pgdata -l /tmp/pg.log start
+
+# Wait for PostgreSQL to be ready (using socket)
+echo "Waiting for PostgreSQL to start..."
+until pg_isready -h /var/run/postgresql; do
+    sleep 1
+done
+echo "PostgreSQL is ready!"
+echo ""
+
+# Create test database and run tests
+createdb -h /var/run/postgresql testdb
+psql -h /var/run/postgresql -d testdb -c "CREATE EXTENSION pg_sexp;"
+
+echo "=== Running basic tests ==="
+psql -h /var/run/postgresql -d testdb -f /test/test_basic.sql
+
+echo ""
+echo "=== Running robustness tests ==="
+psql -h /var/run/postgresql -d testdb -f /test/test_robustness.sql
+
+# Cleanup
+pg_ctl -D /tmp/pgdata stop
+
+echo ""
+echo "=============================================="
+echo "ASan Test Results"
+echo "=============================================="
+
+# Check for ASan error logs
+if ls /tmp/asan.* 1>/dev/null 2>&1; then
+    echo "WARNING: AddressSanitizer detected issues:"
+    echo ""
+    cat /tmp/asan.*
+    echo ""
+    echo "=============================================="
+    exit 1
+else
+    echo "No memory errors detected by AddressSanitizer!"
+    echo "=============================================="
+fi
+EOF
+
+# Set up stress test script for more thorough memory testing
+COPY --chmod=755 <<'EOF' /run-stress-test.sh
+#!/bin/bash
+set -e
+
+echo "=============================================="
+echo "AddressSanitizer Stress Test"
+echo "PostgreSQL 18.1 (Alpine Linux)"
+echo "=============================================="
+echo ""
+
+# Find and preload ASan runtime
+ASAN_LIB=$(clang -print-file-name=libclang_rt.asan-x86_64.so 2>/dev/null || find /usr/lib -name 'libclang_rt.asan*.so' 2>/dev/null | head -1)
+if [ -n "$ASAN_LIB" ] && [ -f "$ASAN_LIB" ]; then
+    export LD_PRELOAD="$ASAN_LIB"
+    echo "Using ASan runtime: $ASAN_LIB"
+fi
+echo ""
+
+export ASAN_OPTIONS="detect_leaks=0:abort_on_error=0:print_legend=1:halt_on_error=0:log_path=/tmp/asan:verify_asan_link_order=0"
+
+# Initialize database cluster
+echo "Initializing PostgreSQL..."
+initdb -D /tmp/pgdata --auth=trust --no-locale --encoding=UTF8
+
+cat >> /tmp/pgdata/postgresql.conf << 'PGCONF'
+listen_addresses = ''
+unix_socket_directories = '/var/run/postgresql'
+PGCONF
+
+echo "Starting PostgreSQL..."
+pg_ctl -D /tmp/pgdata -l /tmp/pg.log start
+
+until pg_isready -h /var/run/postgresql; do
+    sleep 1
+done
+echo "PostgreSQL is ready!"
+echo ""
+
+createdb -h /var/run/postgresql stressdb
+psql -h /var/run/postgresql -d stressdb -c "CREATE EXTENSION pg_sexp;"
+
+echo "=== Running stress tests ==="
+psql -h /var/run/postgresql -d stressdb << 'SQL'
+-- Create table with many S-expressions
+CREATE TABLE stress_test (id serial, data sexp);
+
+-- Insert many varied expressions to stress memory allocation
+INSERT INTO stress_test (data)
+SELECT ('(stress-' || i || ' ' ||
+        repeat('(nested ' || (i % 10)::text || ' data) ', (i % 5) + 1) ||
+        ')')::sexp
+FROM generate_series(1, 1000) i;
+
+-- Test many pattern matches
+SELECT COUNT(*) FROM stress_test WHERE data @> '(nested _ _)';
+SELECT COUNT(*) FROM stress_test WHERE data @> '(stress-* ...)';
+
+-- Test serialization/deserialization cycles
+SELECT COUNT(*) FROM (
+    SELECT data::text::sexp FROM stress_test
+) t;
+
+-- Test comparisons
+SELECT COUNT(DISTINCT data) FROM stress_test;
+
+-- Cleanup
+DROP TABLE stress_test;
+
+\echo 'Stress test completed successfully'
+SQL
+
+pg_ctl -D /tmp/pgdata stop
+
+echo ""
+echo "=============================================="
+if ls /tmp/asan.* 1>/dev/null 2>&1; then
+    echo "WARNING: AddressSanitizer detected issues:"
+    cat /tmp/asan.*
+    exit 1
+else
+    echo "Stress test passed - no memory errors!"
+    echo "=============================================="
+fi
+EOF
+
+# Switch to postgres user
+USER postgres
+
+# Default command: run tests
+CMD ["/run-tests.sh"]

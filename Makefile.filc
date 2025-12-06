@@ -1,0 +1,46 @@
+# Makefile.filc - Build pg_sexp with fil-c compiler
+#
+# This uses PostgreSQL's PGXS build system but overrides the compiler
+# to use fil-c for memory safety.
+#
+# Usage:
+#   make -f Makefile.filc CC=/path/to/filc/build/bin/clang
+#
+# Or in the container:
+#   make -f Makefile.filc
+
+EXTENSION = pg_sexp
+MODULE_big = pg_sexp_filc
+OBJS = src/pg_sexp.o src/sexp_parser.o src/sexp_io.o src/sexp_ops.o src/sexp_match.o src/sexp_gin.o
+
+DATA = sql/pg_sexp--0.1.0.sql
+
+# Use fil-c compiler (override with CC= on command line)
+CC ?= /opt/filc/build/bin/clang
+
+# PostgreSQL build system
+PG_CONFIG ?= pg_config
+PGXS := $(shell $(PG_CONFIG) --pgxs)
+
+# Fil-c specific flags
+# -fPIC is required for shared libraries
+# We keep standard warnings but fil-c handles memory safety
+PG_CFLAGS += -Wall -Wextra -std=c99 -fPIC
+
+# Include PGXS
+include $(PGXS)
+
+# Additional target to show fil-c info
+.PHONY: filc-info
+filc-info:
+	@echo "Fil-C Compiler: $(CC)"
+	@$(CC) --version | head -1
+	@echo "PostgreSQL: $(shell $(PG_CONFIG) --version)"
+	@echo "PGXS: $(PGXS)"
+
+# Test target - load the extension in PostgreSQL
+.PHONY: filc-test
+filc-test: all
+	@echo "Testing fil-c built extension..."
+	@echo "Extension built: $(MODULE_big).so"
+	@ls -la $(MODULE_big).so

@@ -1,0 +1,16 @@
+# Build container for pg_sexp extension
+# Usage: podman build -f Containerfile.build -t pg_sexp-build .
+#        podman run --rm -v $(pwd):/src:Z pg_sexp-build
+
+FROM docker.io/postgres:16
+
+# Install build dependencies
+RUN apt-get update && apt-get install -y \
+    build-essential \
+    postgresql-server-dev-16 \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /src
+
+# Build command
+CMD ["make", "clean", "all"]

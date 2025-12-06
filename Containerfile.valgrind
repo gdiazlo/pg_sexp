@@ -1,0 +1,355 @@
+# Valgrind test container for pg_sexp extension with PostgreSQL 18.1
+#
+# Tests the extension with Valgrind's memcheck tool.
+# Valgrind detects memory errors without requiring recompilation,
+# though it runs significantly slower (~10-20x).
+#
+# Usage:
+#   podman build -f Containerfile.valgrind -t pg_sexp-valgrind .
+#   podman run --rm pg_sexp-valgrind              # Run tests with Valgrind
+#   podman run --rm -it pg_sexp-valgrind sh       # Interactive shell
+#
+# Note: Valgrind is thorough but slow. Good for CI/nightly testing.
+
+FROM docker.io/alpine:3.21 AS builder
+
+ARG PG_VERSION=18.1
+
+# Install build dependencies
+RUN apk add --no-cache \
+    build-base \
+    clang \
+    llvm \
+    llvm-dev \
+    readline-dev \
+    zlib-dev \
+    openssl-dev \
+    icu-dev \
+    pkgconf \
+    bison \
+    flex \
+    wget \
+    perl \
+    linux-headers
+
+WORKDIR /build
+
+# Download and build PostgreSQL 18.1 with debug symbols
+RUN wget -q https://ftp.postgresql.org/pub/source/v${PG_VERSION}/postgresql-${PG_VERSION}.tar.bz2 && \
+    tar xjf postgresql-${PG_VERSION}.tar.bz2 && \
+    cd postgresql-${PG_VERSION} && \
+    ./configure \
+        --prefix=/usr/local/pgsql \
+        --with-openssl \
+        --with-llvm \
+        --enable-debug \
+        CC=clang \
+        CFLAGS="-g -O1 -fno-omit-frame-pointer" \
+        LLVM_CONFIG=/usr/bin/llvm-config && \
+    make -j$(nproc) && \
+    make install
+
+# Set up PostgreSQL environment for building extensions
+ENV PATH="/usr/local/pgsql/bin:$PATH"
+ENV LD_LIBRARY_PATH="/usr/local/pgsql/lib"
+
+# Build pg_sexp extension with debug symbols
+WORKDIR /build/pg_sexp
+COPY src/ src/
+COPY sql/ sql/
+COPY Makefile pg_sexp.control ./
+
+ENV CFLAGS="-g -O1 -fno-omit-frame-pointer"
+RUN make clean all && make install
+
+# Copy test files
+COPY test/ test/
+
+# ============================================================================
+# Runtime image
+# ============================================================================
+FROM docker.io/alpine:3.21
+
+ARG PG_VERSION=18.1
+
+# Install runtime dependencies and Valgrind
+RUN apk add --no-cache \
+    readline \
+    zlib \
+    openssl \
+    icu-libs \
+    llvm19-libs \
+    valgrind \
+    procps \
+    bash
+
+# Copy PostgreSQL from builder
+COPY --from=builder /usr/local/pgsql /usr/local/pgsql
+COPY --from=builder /build/pg_sexp/test /test
+
+# Set up PostgreSQL environment
+ENV PATH="/usr/local/pgsql/bin:$PATH"
+ENV LD_LIBRARY_PATH="/usr/local/pgsql/lib"
+ENV PGDATA="/tmp/pgdata"
+
+# Create postgres user and directories
+RUN addgroup -g 70 -S postgres && \
+    adduser -u 70 -S -D -G postgres -H -h /var/lib/postgresql postgres && \
+    mkdir -p /var/run/postgresql && \
+    mkdir -p /tmp/pgdata && \
+    chown -R postgres:postgres /var/run/postgresql /tmp/pgdata /test
+
+# Create Valgrind suppression file for known PostgreSQL issues
+COPY --chmod=644 <<'EOF' /valgrind.supp
+# Valgrind suppression file for PostgreSQL
+# Suppress known false positives from PostgreSQL internals
+
+{
+   PostgreSQL_dlopen
+   Memcheck:Leak
+   ...
+   fun:dlopen*
+}
+
+{
+   PostgreSQL_timezone
+   Memcheck:Leak
+   ...
+   fun:pg_tzset
+}
+
+{
+   PostgreSQL_GUC
+   Memcheck:Leak
+   ...
+   fun:*GUC*
+}
+
+{
+   PostgreSQL_locale
+   Memcheck:Leak
+   ...
+   fun:*locale*
+}
+
+{
+   PostgreSQL_ps_display
+   Memcheck:Leak
+   ...
+   fun:save_ps_display_args
+}
+
+{
+   PostgreSQL_XLog_uninitialized
+   Memcheck:Param
+   pwrite64(buf)
+   ...
+   fun:XLogFlush
+}
+
+{
+   PostgreSQL_heap_multi_insert
+   Memcheck:Param
+   pwrite64(buf)
+   ...
+   fun:heap_multi_insert
+}
+
+{
+   musl_setenv
+   Memcheck:Leak
+   ...
+   fun:setenv
+}
+
+{
+   musl_getenv
+   Memcheck:Leak
+   ...
+   fun:getenv
+}
+EOF
+
+# Set up test script - uses Unix socket only, no TCP port exposure
+COPY --chmod=755 <<'EOF' /run-tests.sh
+#!/bin/bash
+set -e
+
+echo "=============================================="
+echo "Valgrind pg_sexp Extension Tests"
+echo "PostgreSQL 18.1 (Alpine Linux)"
+echo "=============================================="
+echo ""
+
+VALGRIND_LOG="/tmp/valgrind.log"
+
+# Initialize database cluster
+echo "Initializing PostgreSQL..."
+initdb -D /tmp/pgdata --auth=trust --no-locale --encoding=UTF8
+
+# Configure PostgreSQL to use Unix socket only (no TCP)
+cat >> /tmp/pgdata/postgresql.conf << 'PGCONF'
+listen_addresses = ''
+unix_socket_directories = '/var/run/postgresql'
+# Reduce memory for faster Valgrind testing
+shared_buffers = 32MB
+work_mem = 4MB
+PGCONF
+
+# Start PostgreSQL under Valgrind
+# Use --single mode for simpler Valgrind testing
+echo "Starting PostgreSQL with Valgrind (this may take a while)..."
+
+# First, start normally to create database
+pg_ctl -D /tmp/pgdata -l /tmp/pg.log start
+until pg_isready -h /var/run/postgresql; do sleep 1; done
+createdb -h /var/run/postgresql testdb
+pg_ctl -D /tmp/pgdata stop
+
+echo ""
+echo "Running tests under Valgrind..."
+echo "(This will be slow - Valgrind adds ~10-20x overhead)"
+echo ""
+
+# Run tests with Valgrind using single-user mode
+# Use simpler SQL that works in single-user mode (no psql metacommands)
+valgrind \
+    --leak-check=full \
+    --show-leak-kinds=definite,possible \
+    --track-origins=yes \
+    --suppressions=/valgrind.supp \
+    --log-file="$VALGRIND_LOG" \
+    postgres --single -D /tmp/pgdata testdb << 'SQL'
+CREATE EXTENSION pg_sexp;
+SELECT '(hello world)'::sexp;
+SELECT '(nested (list (of items)))'::sexp;
+SELECT '(with "string data" 123 45.67)'::sexp;
+SELECT '(a b c)'::sexp @> '(a _ _)';
+SELECT '(foo (bar baz))'::sexp @> '(foo _)';
+SELECT '(1 2 3 4 5)'::sexp @> '(1 ...)';
+SELECT '(a b)'::sexp = '(a b)'::sexp;
+SELECT ('(complex (nested "string" 123) data)'::sexp)::text::sexp;
+SELECT '(list a b c d e)'::sexp @> '(list ...)';
+SELECT '(pair x y)'::sexp @> '(pair _ _)';
+SELECT car('(a b c)'::sexp);
+SELECT cdr('(a b c)'::sexp);
+SELECT nth('(a b c d e)'::sexp, 2);
+SELECT sexp_length('(a b c d e)'::sexp);
+SELECT sexp_typeof('hello'::sexp);
+SELECT sexp_typeof('123'::sexp);
+SELECT sexp_typeof('(a b)'::sexp);
+SELECT is_list('(a b c)'::sexp);
+SELECT is_atom('hello'::sexp);
+SELECT is_symbol('hello'::sexp);
+SELECT is_number('42'::sexp);
+SELECT is_string('"hello"'::sexp);
+SELECT is_nil('()'::sexp);
+SELECT '(deep (nested (structure (here))))'::sexp @> '(nested _)';
+SELECT sexp_find('(a (b (c d)) e)'::sexp, '(c _)');
+SQL
+
+echo ""
+echo "=============================================="
+echo "Valgrind Results"
+echo "=============================================="
+echo ""
+
+# Parse Valgrind output
+if grep -q "ERROR SUMMARY: 0 errors" "$VALGRIND_LOG"; then
+    echo "No memory errors detected!"
+    echo ""
+    # Show leak summary
+    grep -A 5 "LEAK SUMMARY" "$VALGRIND_LOG" || true
+else
+    echo "Valgrind output:"
+    cat "$VALGRIND_LOG"
+    
+    # Check if there are actual errors (not just PostgreSQL internals)
+    ERROR_COUNT=$(grep "ERROR SUMMARY:" "$VALGRIND_LOG" | grep -oP '\d+(?= errors)' || echo "0")
+    if [ "$ERROR_COUNT" != "0" ]; then
+        echo ""
+        echo "WARNING: Valgrind detected $ERROR_COUNT error(s)"
+        exit 1
+    fi
+fi
+
+echo ""
+echo "=============================================="
+echo "Valgrind test completed successfully!"
+echo "=============================================="
+EOF
+
+# Set up comprehensive test script
+COPY --chmod=755 <<'EOF' /run-full-tests.sh
+#!/bin/bash
+set -e
+
+echo "=============================================="
+echo "Valgrind Full Test Suite"
+echo "PostgreSQL 18.1 (Alpine Linux)"
+echo "=============================================="
+echo ""
+
+VALGRIND_LOG="/tmp/valgrind_full.log"
+
+# Initialize database cluster
+echo "Initializing PostgreSQL..."
+initdb -D /tmp/pgdata --auth=trust --no-locale --encoding=UTF8
+
+cat >> /tmp/pgdata/postgresql.conf << 'PGCONF'
+listen_addresses = ''
+unix_socket_directories = '/var/run/postgresql'
+shared_buffers = 32MB
+work_mem = 4MB
+PGCONF
+
+pg_ctl -D /tmp/pgdata -l /tmp/pg.log start
+until pg_isready -h /var/run/postgresql; do sleep 1; done
+createdb -h /var/run/postgresql testdb
+pg_ctl -D /tmp/pgdata stop
+
+echo ""
+echo "Running full test suite under Valgrind..."
+echo "(This will take several minutes)"
+echo ""
+
+# Combine test files for single-user mode
+{
+    echo "CREATE EXTENSION pg_sexp;"
+    # Strip psql-specific commands from test files
+    grep -v '^\s*\\' /test/test_basic.sql || true
+    grep -v '^\s*\\' /test/test_robustness.sql || true
+} > /tmp/combined_tests.sql
+
+valgrind \
+    --leak-check=full \
+    --show-leak-kinds=definite,possible \
+    --track-origins=yes \
+    --suppressions=/valgrind.supp \
+    --log-file="$VALGRIND_LOG" \
+    postgres --single -D /tmp/pgdata testdb < /tmp/combined_tests.sql
+
+echo ""
+echo "=============================================="
+echo "Valgrind Full Test Results"
+echo "=============================================="
+
+if grep -q "ERROR SUMMARY: 0 errors" "$VALGRIND_LOG"; then
+    echo "No memory errors detected!"
+    grep -A 5 "LEAK SUMMARY" "$VALGRIND_LOG" || true
+else
+    echo "Memory errors detected:"
+    cat "$VALGRIND_LOG"
+    exit 1
+fi
+
+echo ""
+echo "Full Valgrind test completed!"
+echo "=============================================="
+EOF
+
+# Switch to postgres user
+USER postgres
+
+# Default command: run tests
+CMD ["/run-tests.sh"]
