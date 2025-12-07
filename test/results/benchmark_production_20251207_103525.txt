@@ -1,0 +1,60 @@
+Initializing PostgreSQL...
+The files belonging to this database system will be owned by user "postgres".
+This user must also own the server process.
+
+The database cluster will be initialized with locale "en_US.UTF-8".
+The default text search configuration will be set to "english".
+
+Data page checksums are enabled.
+
+fixing permissions on existing directory /var/lib/postgresql/data ... ok
+creating subdirectories ... ok
+selecting dynamic shared memory implementation ... posix
+selecting default "max_connections" ... 100
+selecting default "shared_buffers" ... 128MB
+selecting default time zone ... UTC
+creating configuration files ... ok
+running bootstrap script ... ok
+performing post-bootstrap initialization ... sh: locale: not found
+2025-12-07 09:35:25.909 UTC [7] WARNING:  no usable system locales were found
+ok
+syncing data to disk ... ok
+
+Success. You can now start the database server using:
+
+    pg_ctl -D /var/lib/postgresql/data -l logfile start
+
+waiting for server to start.... done
+server started
+Running /docker-entrypoint-initdb.d/00-init-extensions.sql
+You are now connected to database "template1" as user "postgres".
+CREATE EXTENSION
+CREATE EXTENSION
+You are now connected to database "postgres" as user "postgres".
+CREATE DATABASE
+You are now connected to database "tsdb" as user "postgres".
+psql:/docker-entrypoint-initdb.d/00-init-extensions.sql:16: NOTICE:  extension "timescaledb" already exists, skipping
+CREATE EXTENSION
+psql:/docker-entrypoint-initdb.d/00-init-extensions.sql:17: NOTICE:  extension "pg_sexp" already exists, skipping
+CREATE EXTENSION
+ component  |                                         version                                          
+------------+------------------------------------------------------------------------------------------
+ PostgreSQL | PostgreSQL 18.1 on x86_64-pc-linux-musl, compiled by Alpine clang version 19.1.4, 64-bit
+(1 row)
+
+  component  | version 
+-------------+---------
+ TimescaleDB | 2.24.0
+(1 row)
+
+ component | version 
+-----------+---------
+ pg_sexp   | 0.1.0
+(1 row)
+
+waiting for server to shut down.... done
+server stopped
+PostgreSQL initialization complete.
+Starting PostgreSQL...
+2025-12-07 09:35:26.859 UTC [1] LOG:  redirecting log output to logging collector process
+2025-12-07 09:35:26.859 UTC [1] HINT:  Future log output will appear in directory "pg_log".
