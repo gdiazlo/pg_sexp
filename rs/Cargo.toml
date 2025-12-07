@@ -1,0 +1,40 @@
+[package]
+name = "pg_sexp_rs"
+version = "0.1.0"
+edition = "2021"
+authors = ["pg_sexp contributors"]
+license = "MIT"
+description = "S-expression data type for PostgreSQL (Rust implementation using pgrx)"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[[bin]]
+name = "pgrx_embed_pg_sexp_rs"
+path = "src/bin/pgrx_embed.rs"
+
+[features]
+default = ["pg18"]
+pg14 = ["pgrx/pg14", "pgrx-tests/pg14"]
+pg15 = ["pgrx/pg15", "pgrx-tests/pg15"]
+pg16 = ["pgrx/pg16", "pgrx-tests/pg16"]
+pg17 = ["pgrx/pg17", "pgrx-tests/pg17"]
+pg18 = ["pgrx/pg18", "pgrx-tests/pg18"]
+pg_test = []
+
+[dependencies]
+pgrx = "0.16"
+serde = { version = "1.0", features = ["derive"] }
+
+[dev-dependencies]
+pgrx-tests = "0.16"
+
+[profile.dev]
+panic = "unwind"
+lto = "thin"
+
+[profile.release]
+panic = "unwind"
+opt-level = 3
+lto = "fat"
+codegen-units = 1

@@ -1,0 +1,5 @@
+comment = 'pg_sexp_rs: S-expression data type for PostgreSQL (Rust implementation)'
+default_version = '@CARGO_VERSION@'
+module_pathname = '$libdir/pg_sexp_rs'
+relocatable = false
+superuser = false
