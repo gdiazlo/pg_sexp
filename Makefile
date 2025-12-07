@@ -17,7 +17,7 @@ PG_CFLAGS += -Wall -Wextra -Werror -std=c99 -O3 -fno-strict-aliasing
 # Container-based build and test targets
 .PHONY: container-build container-test container-shell filc-build filc-test filc-shell
 .PHONY: asan-build asan-test asan-stress asan-shell valgrind-build valgrind-test valgrind-shell
-.PHONY: timescaledb-build timescaledb-test timescaledb-shell
+
 .PHONY: production-build production-test production-shell production-run
 
 CONTAINER_ENGINE ?= podman
@@ -26,7 +26,7 @@ TEST_IMAGE = pg_sexp-test
 FILC_IMAGE = pg_sexp-filc
 ASAN_IMAGE = pg_sexp-asan
 VALGRIND_IMAGE = pg_sexp-valgrind
-TIMESCALEDB_IMAGE = pg_sexp-timescaledb
+
 PRODUCTION_IMAGE = pg_sexp-production
 
 container-build:
@@ -84,17 +84,6 @@ valgrind-shell:
 # Run all memory safety tests
 memory-test: asan-test valgrind-test
 	@echo "All memory safety tests passed!"
-
-# TimescaleDB compatibility testing
-# Tests hypertables, compression, and continuous aggregates with sexp columns
-timescaledb-build:
-	$(CONTAINER_ENGINE) build -f Containerfile.timescaledb -t $(TIMESCALEDB_IMAGE) .
-
-timescaledb-test: timescaledb-build
-	$(CONTAINER_ENGINE) run --rm $(TIMESCALEDB_IMAGE)
-
-timescaledb-shell:
-	$(CONTAINER_ENGINE) run --rm -it $(TIMESCALEDB_IMAGE) bash
 
 # Production container with PostgreSQL 18.1, TimescaleDB, and pg_sexp
 # Designed for production use with distributed TimescaleDB clusters
