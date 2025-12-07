@@ -382,17 +382,28 @@ get_sentry_type_from_tag(uint8 tag_byte)
  *
  * Returns: structural hash of the list
  */
+/*
+ * Stack buffer size for small lists - avoids palloc for most lists.
+ * Most real-world lists have fewer than 16 elements.
+ */
+#define PARSE_LIST_STACK_SIZE 16
+
 static uint32
 parse_list(SexpParseState *state)
 {
     StringInfoData elements;
     StringInfo saved_output;
     int count = 0;
-    int capacity = 16;
+    int capacity = PARSE_LIST_STACK_SIZE;
     SEntry *sentries;
     uint32 *child_hashes;
     uint32 list_hash;
     int i;
+    
+    /* Stack-allocated buffers for small lists - avoids palloc overhead */
+    SEntry stack_sentries[PARSE_LIST_STACK_SIZE];
+    uint32 stack_child_hashes[PARSE_LIST_STACK_SIZE];
+    bool use_stack = true;
     
     /* Check depth limit using defensive macro */
     SEXP_CHECK_DEPTH(state->depth);
@@ -419,8 +430,9 @@ parse_list(SexpParseState *state)
     saved_output = state->output;
     state->output = &elements;
     
-    sentries = palloc(sizeof(SEntry) * capacity);
-    child_hashes = palloc(sizeof(uint32) * capacity);
+    /* Start with stack-allocated arrays */
+    sentries = stack_sentries;
+    child_hashes = stack_child_hashes;
     
     while (state->ptr < state->end && *state->ptr != ')')
     {
@@ -432,9 +444,26 @@ parse_list(SexpParseState *state)
         /* Record offset before parsing element */
         if (count >= capacity)
         {
-            capacity *= 2;
-            sentries = repalloc(sentries, sizeof(SEntry) * capacity);
-            child_hashes = repalloc(child_hashes, sizeof(uint32) * capacity);
+            int new_capacity = capacity * 2;
+            
+            if (use_stack)
+            {
+                /* First overflow: move from stack to heap */
+                SEntry *new_sentries = palloc(sizeof(SEntry) * new_capacity);
+                uint32 *new_hashes = palloc(sizeof(uint32) * new_capacity);
+                memcpy(new_sentries, sentries, sizeof(SEntry) * count);
+                memcpy(new_hashes, child_hashes, sizeof(uint32) * count);
+                sentries = new_sentries;
+                child_hashes = new_hashes;
+                use_stack = false;
+            }
+            else
+            {
+                /* Already on heap: repalloc */
+                sentries = repalloc(sentries, sizeof(SEntry) * new_capacity);
+                child_hashes = repalloc(child_hashes, sizeof(uint32) * new_capacity);
+            }
+            capacity = new_capacity;
         }
         elem_start = elements.len;
         
@@ -458,8 +487,11 @@ parse_list(SexpParseState *state)
     if (state->ptr >= state->end)
     {
         pfree(elements.data);
-        pfree(sentries);
-        pfree(child_hashes);
+        if (!use_stack)
+        {
+            pfree(sentries);
+            pfree(child_hashes);
+        }
         ereport(ERROR,
                 (errcode(ERRCODE_INVALID_TEXT_REPRESENTATION),
                  errmsg("unterminated list")));
@@ -518,8 +550,11 @@ parse_list(SexpParseState *state)
     }
     
     pfree(elements.data);
-    pfree(sentries);
-    pfree(child_hashes);
+    if (!use_stack)
+    {
+        pfree(sentries);
+        pfree(child_hashes);
+    }
     
     return list_hash;
 }

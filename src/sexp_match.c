@@ -565,15 +565,18 @@ sexp_match_with_captures(Sexp *expr, Sexp *pattern, SexpMatchResult *result)
 
 /*
  * Recursive search for pattern in expression
+ * 
+ * OPTIMIZATION: Takes a pre-initialized pattern state to avoid re-parsing
+ * the pattern's symbol table for every element visited. The pattern state's
+ * ptr is reset to pat_start before each match attempt.
  */
 static bool
 find_pattern_recursive(SexpReadState *expr_state, Sexp *expr_parent,
-                       Sexp *pattern, Sexp **found)
+                       SexpReadState *pat_state, uint8 *pat_start, Sexp **found)
 {
     uint8 byte;
     uint8 tag;
     uint8 *start_ptr;
-    SexpReadState pat_state;
     
     if (expr_state->ptr >= expr_state->end)
         return false;
@@ -581,7 +584,8 @@ find_pattern_recursive(SexpReadState *expr_state, Sexp *expr_parent,
     start_ptr = expr_state->ptr;
     
     /* Try matching at current position */
-    sexp_init_read_state(&pat_state, pattern);
+    /* Reset pattern state pointer to start of pattern element */
+    pat_state->ptr = pat_start;
     
     /* Save expression state for potential match */
     {
@@ -589,16 +593,13 @@ find_pattern_recursive(SexpReadState *expr_state, Sexp *expr_parent,
         expr_copy = *expr_state;
         expr_copy.ptr = start_ptr;
         
-        if (elements_match(&expr_copy, &pat_state, NULL))
+        if (elements_match(&expr_copy, pat_state, NULL))
         {
             /* Match found! Extract this element */
             *found = extract_current_element(expr_state, expr_parent);
-            sexp_free_read_state(&pat_state);
             return true;
         }
     }
-    
-    sexp_free_read_state(&pat_state);
     
     /* No match at this position - if it's a list, search children */
     byte = *expr_state->ptr++;
@@ -629,7 +630,7 @@ find_pattern_recursive(SexpReadState *expr_state, Sexp *expr_parent,
         
         for (i = 0; i < count; i++)
         {
-            if (find_pattern_recursive(expr_state, expr_parent, pattern, found))
+            if (find_pattern_recursive(expr_state, expr_parent, pat_state, pat_start, found))
                 return true;
         }
     }
@@ -645,18 +646,29 @@ find_pattern_recursive(SexpReadState *expr_state, Sexp *expr_parent,
 
 /*
  * sexp_find_first - Find first subexpression matching pattern
+ * 
+ * OPTIMIZATION: Initializes pattern state once and passes it to recursive
+ * search, avoiding O(N) re-parsing of the pattern's symbol table where N
+ * is the number of elements visited.
  */
 Sexp *
 sexp_find_first(Sexp *expr, Sexp *pattern)
 {
     SexpReadState expr_state;
+    SexpReadState pat_state;
     Sexp *found = NULL;
+    uint8 *pat_start;
     
     sexp_init_read_state(&expr_state, expr);
+    sexp_init_read_state(&pat_state, pattern);
     
-    find_pattern_recursive(&expr_state, expr, pattern, &found);
+    /* Save the starting position of the pattern element */
+    pat_start = pat_state.ptr;
+    
+    find_pattern_recursive(&expr_state, expr, &pat_state, pat_start, &found);
     
     sexp_free_read_state(&expr_state);
+    sexp_free_read_state(&pat_state);
     
     return found;
 }

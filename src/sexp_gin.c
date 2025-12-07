@@ -71,39 +71,20 @@
  */
 
 /*
- * Key Extraction Strategy:
- * 
- * Keys are extracted selectively to balance index size and query performance:
- * 
- * 1. PAIR KEYS: For 2-element (symbol value) lists like (age 30),
- *    extract hash(symbol, value). This provides high selectivity for
- *    common key-value patterns.
- * 
- * 2. ATOM KEYS: All atoms (symbols, strings, integers, floats) get
- *    individual keys. Required for queries that search for specific values.
- * 
- * 3. LIST HEAD KEYS: Lists with 3+ elements get a key based on their
- *    first element (car). This helps find (tag ...) style lists.
- *    Skipped for 2-element lists where pair keys are more selective.
- */
-static inline uint32
-hash_combine32(uint32 seed, uint32 hash)
-{
-    return seed ^ (hash + 0x9e3779b9 + (seed << 6) + (seed >> 2));
-}
-
-/*
  * Simple hash set for O(1) key deduplication.
  * Uses open addressing with linear probing.
  * Size is power of 2 for fast modulo via bitmask.
  * 
- * Sizing rationale: MAX_GIN_KEYS is 2048. With pair keys and Bloom keys,
- * very key-rich inputs could approach 3000-4000 unique keys. Using 8192
+ * Sizing rationale: MAX_GIN_KEYS is 1024. With pair keys,
+ * inputs could approach 2000-3000 unique keys. Using 4096
  * maintains a load factor under 50%, keeping probe chains short.
+ * 
+ * OPTIMIZATION: Reduced from 8192 to 4096 to halve init time.
+ * Still provides 4x headroom over MAX_GIN_KEYS.
  */
-#define KEY_HASHSET_SIZE 8192  /* Must be power of 2 and >> MAX_GIN_KEYS */
+#define KEY_HASHSET_SIZE 4096  /* Must be power of 2 and > 2*MAX_GIN_KEYS */
 #define KEY_HASHSET_MASK (KEY_HASHSET_SIZE - 1)
-#define KEY_HASHSET_EMPTY 0x7FFFFFFF  /* Sentinel value (keys have high bit set) */
+#define KEY_HASHSET_EMPTY 0x7F7F7F7F  /* Sentinel: all bytes 0x7F for fast memset */
 
 typedef struct KeyHashSet
 {
@@ -111,12 +92,17 @@ typedef struct KeyHashSet
     int     count;
 } KeyHashSet;
 
+/*
+ * Initialize hash set using memset for speed.
+ * OPTIMIZATION: memset is much faster than a loop (uses SIMD on modern CPUs).
+ * The sentinel value 0x7F7F7F7F is chosen because memset works byte-by-byte,
+ * so memset(ptr, 0x7F, size) fills each byte with 0x7F, resulting in
+ * the 32-bit value 0x7F7F7F7F in each slot.
+ */
 static inline void
 key_hashset_init(KeyHashSet *hs)
 {
-    int i;
-    for (i = 0; i < KEY_HASHSET_SIZE; i++)
-        hs->slots[i] = KEY_HASHSET_EMPTY;
+    memset(hs->slots, 0x7F, sizeof(hs->slots));
     hs->count = 0;
 }
 
@@ -508,8 +494,8 @@ extract_keys_recursive_impl(uint8 *ptr, uint8 *end,
                 second_hash = get_element_hash(second_elem, end, symbols, sym_lengths, sym_count);
                 
                 /* Combine head (symbol) hash with second element hash */
-                pair_hash = hash_combine32(KEY_TYPE_PAIR, head_hash);
-                pair_hash = hash_combine32(pair_hash, second_hash);
+                pair_hash = hash_combine(KEY_TYPE_PAIR, head_hash);
+                pair_hash = hash_combine(pair_hash, second_hash);
                 
                 add_key(keys, nkeys, capacity, make_atom_key(KEY_TYPE_PAIR, pair_hash), seen);
                 
@@ -807,9 +793,9 @@ extract_query_keys_recursive(uint8 *ptr, uint8 *end,
                 
                 second_hash = get_element_hash(second_elem, end, symbols, sym_lengths, sym_count);
                 
-                /* Use hash_combine32 for better mixing */
-                pair_hash = hash_combine32(KEY_TYPE_PAIR, head_hash);
-                pair_hash = hash_combine32(pair_hash, second_hash);
+                /* Use PostgreSQL's hash_combine for better mixing */
+                pair_hash = hash_combine(KEY_TYPE_PAIR, head_hash);
+                pair_hash = hash_combine(pair_hash, second_hash);
                 
                 add_key(keys, nkeys, capacity, make_atom_key(KEY_TYPE_PAIR, pair_hash), seen);
             }
